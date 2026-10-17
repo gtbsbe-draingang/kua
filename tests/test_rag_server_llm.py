@@ -98,7 +98,7 @@ def test_openai_llm_removes_think_blocks(posts, content, text):
 ], ids=repr)
 def test_openai_llm_raises_on_a_bad_reply(posts, reply):
     posts.replies.append(reply)
-    with pytest.raises(Exception):  # noqa: B017 - the server maps every failure to one 502, as for http_llm
+    with pytest.raises((RuntimeError, ValueError)):  # the server maps every failure to one 502, as for http_llm
         rag_server.openai_llm(CHAT_URL, "m")("s", "p", 5.0)
 
 
