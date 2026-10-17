@@ -192,6 +192,61 @@ def test_verify_multi_aligns_and_handles_errors(server, monkeypatch, tmp_path):
         assert clients.verify_multi(str(w), RULES, 10) == ([None, None, None], ""), reply
 
 
+def _multi_rules():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import verify_candidates as vc
+
+    from pipeline import real
+    return vc.multi_rules(real._config())
+
+
+def test_multi_prompt_en_unchanged():
+    import hashlib
+
+    rules = _multi_rules()
+    p = clients.multi_prompt(rules)
+    assert len(rules) == 13 and clients.multi_prompt(rules, lang="en") == p
+    # the English prompt of the 13 catalogue rules, pinned before the Chinese variant was added
+    assert hashlib.md5(p.encode()).hexdigest() == "3ddc7ebae68d4497480826af06d64fcf" and len(p) == 2310
+
+
+def test_multi_prompt_zh_numbers_every_rule_and_keeps_yes_no():
+    from pipeline.prompts_zh import VERIFY_PROMPTS_ZH
+
+    rules = _multi_rules()
+    p = clients.multi_prompt(rules, lang="zh")
+    lines = p.splitlines()
+    assert lines[0] == "这是银行收银台监控摄像头拍摄的一段短视频。"
+    assert lines[1] == "请用 YES 或 NO 回答以下 13 个关于该视频的问题。只有在视频中清楚可见时才回答 YES。"
+    questions = [f"{k}. {VERIFY_PROMPTS_ZH[r['id']]}" for k, r in enumerate(rules, 1)]
+    answers = [f"{k}. YES or {k}. NO" for k in range(1, 14)]
+    at = [lines.index(q) for q in questions + answers]
+    assert at == sorted(at) and at[:13] == list(range(2, 15)) and at[13:] == list(range(at[13], at[13] + 13))
+    assert "共 14 行" in p and "答案只写英文 YES 或 NO" in p
+    assert lines[-1] == ("OBSERVATION: <用俄语（русский язык）写 1-3 句话，只描述可见的动作，"
+                         "包括在场人员（只写角色）以及现金所在位置>")
+    assert lines[at[-1] + 1] == lines[-1]
+    for s in ("«кассир»", "«клиент»", "«инкассатор»"):
+        assert s in p, s
+    assert set(VERIFY_PROMPTS_ZH) == {r["id"] for r in rules}
+    # an id without a Chinese question keeps its English one; the answer lines are built the same way
+    extra = clients.multi_prompt([{"id": "split", "verify_prompt": "Is the cash\n   drawer open?\n"}], lang="zh")
+    assert "1. Is the cash drawer open?" in extra.splitlines() and "1. YES or 1. NO" in extra.splitlines()
+
+
+def test_verify_multi_zh_sends_the_chinese_prompt(server, monkeypatch, tmp_path):
+    monkeypatch.setenv("IV3_URL", server.url + "/verify")
+    w = tmp_path / "w.mp4"
+    w.write_bytes(b"x")
+    server.reply = (200, {"p_yes": 0.9, "p_yes_list": [0.9, None, 0.25], "observation": "Кассир считает деньги."})
+    assert clients.verify_multi(str(w), RULES, 10, lang="zh") == ([0.9, None, 0.25], "Кассир считает деньги.")
+    assert server.requests[0][1]["prompt"] == clients.multi_prompt(RULES, lang="zh")
+    assert server.requests[0][1]["n_answers"] == 3
+
+
 def test_verify_multi_without_time_or_server(server, monkeypatch):
     monkeypatch.setenv("IV3_URL", server.url + "/verify")
     assert clients.verify_multi("/w.mp4", RULES, 0) == ([None, None, None], "")

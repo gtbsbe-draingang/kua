@@ -13,7 +13,8 @@ On the pod (needs the iv3 server and the clips; no VideoJev):
               (real._verify_rules)
     rule      clients.verify with only the candidate's rule (its verify_prompt in the same template)
     multi     clients.verify_multi: one numbered YES/NO question per detectable rule except "other", in
-              catalogue order (MULTI_RULES); p_yes = the max of the answers, type_id = the rule that gives it
+              catalogue order (multi_rules); p_yes = the max of the answers, type_id = the rule that gives it.
+              With --lang zh, the Chinese template and questions (pipeline/prompts_zh.py); variant multi_zh
   --zoom crops each window to the people in it first: zoom.person_box on the normalised copy over the
   window, then cut_window(crop=...); a detector error or no person cuts the window uncropped, as the pipeline
   does. The record keeps the box, the detector's seconds and any error.
@@ -172,7 +173,9 @@ def cmd_run(a) -> int:
     if a.zoom:
         from pipeline import zoom
     cfg = real._config()
-    variant = variant_name(a.prompt, a.zoom)
+    if a.lang != "en" and a.prompt != "multi":
+        raise SystemExit("--lang zh applies to --prompt multi only")
+    variant = variant_name(a.prompt + ("_zh" if a.lang == "zh" else ""), a.zoom)
     labels = load_labels(a.labels)
     files = resolve_clips(a.clips)
     cache_path = Path(a.cache)
@@ -230,7 +233,7 @@ def cmd_run(a) -> int:
                     t0 = time.monotonic()
                     if a.prompt == "multi":
                         rules = multi_rules(cfg)
-                        p, obs = clients.verify_multi(path, rules, timeout)
+                        p, obs = clients.verify_multi(path, rules, timeout, lang=a.lang)
                         tid = None
                     else:
                         rules = real._verify_rules(cfg, rule) if a.prompt == "pipeline" else [cfg.rules[rule]]
@@ -489,7 +492,7 @@ def cmd_report(a) -> int:
     for c in a.cache:
         cache.update(load_cache(Path(c)))
     present = {d.get("prompt") for d in cache.values()}
-    variants = a.variant or [v for v in (variant_name(p, z) for p in ("pipeline", "rule", "multi")
+    variants = a.variant or [v for v in (variant_name(p, z) for p in ("pipeline", "rule", "multi", "multi_zh")
                                          for z in (False, True)) if v in present]
     summaries = {}
     want = None
@@ -592,6 +595,8 @@ def main(argv=None) -> int:
             p.add_argument("--clips", default=str(ROOT / "data" / "clips"))
             p.add_argument("--prompt", choices=["pipeline", "rule", "multi"], default="pipeline")
             p.add_argument("--zoom", action="store_true", help="crop each window to the people in it")
+            p.add_argument("--lang", choices=["en", "zh"], default="en",
+                           help="multi only: zh asks the Chinese template and questions (variant multi_zh)")
         else:
             p.add_argument("--cache", action="append", help=f"repeatable (default {default_cache})")
             p.add_argument("--variant", action="append", help="pipeline, rule or multi, optionally +zoom")
