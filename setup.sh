@@ -244,7 +244,7 @@ build_main() {
     "flash-attn @ $FA_REL/$fa" "causal-conv1d @ $CC_REL/$cc" \
     transformers==5.14.1 accelerate safetensors numpy pillow av==18.1.0 \
     flash-linear-attention==0.4.2 fla-core==0.4.2 \
-    fastapi uvicorn python-multipart pyyaml httpx openpyxl snowballstemmer
+    fastapi uvicorn python-multipart pyyaml httpx openpyxl "snowballstemmer>=3.1.1"
   freeze main
   check main '
 import torch, torchvision, transformers, accelerate, safetensors, numpy, PIL, av

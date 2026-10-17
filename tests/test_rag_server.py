@@ -226,13 +226,24 @@ def test_rag_server_healthz_says_what_is_serving():
 
 # ---- the real app: import, startup, LLM client ---------------------------------------------
 
+ENV_READ = re.compile(r"""(?:environ(?:\.get|\.setdefault|\.pop)?\s*[(\[]|getenv\s*\()\s*["'](RAG_[A-Z0-9_]+)["']""")
+
+
+def test_env_read_pattern_sees_every_way_of_reading_a_variable():
+    src = ('os.environ.get("RAG_A"); os.environ["RAG_B"]; os.getenv("RAG_C", "x"); environ.get( "RAG_D" ); '
+           "os.environ.setdefault('RAG_E', '1'); os.environ.pop(\"RAG_F\", None); os.environ.get(\"OTHER_G\")")
+    assert sorted(ENV_READ.findall(src)) == ["RAG_A", "RAG_B", "RAG_C", "RAG_D", "RAG_E", "RAG_F"]
+
+
 def test_header_documents_every_rag_environment_variable():
-    """The module header is the one place that lists the RAG_* switches; one the code reads must be in it."""
+    """The module header is the one place that lists the RAG_* switches; one the code reads must be in it, as a whole
+    word (RAG_LLM_URL is not RAG_LLM_URLS)."""
     names = set()
     for module in ("servers/rag_server.py", "rag/retrieve.py"):
-        names |= set(re.findall(r'environ\.get\("(RAG_[A-Z_]+)"', (ROOT / module).read_text()))
-    assert {"RAG_LLM_KIND", "RAG_LLM_MODEL", "RAG_HYBRID"} <= names
-    assert [n for n in sorted(names) if n not in rag_server.__doc__] == []
+        names |= set(ENV_READ.findall((ROOT / module).read_text()))
+    assert {"RAG_LLM_KIND", "RAG_LLM_MODEL", "RAG_HYBRID", "RAG_LLM_URL", "RAG_LLM_URLS"} <= names
+    assert [n for n in sorted(names) if not re.search(rf"\b{n}\b", rag_server.__doc__)] == []
+    assert not re.search(r"\bRAG_LLM_URL\b", "RAG_LLM_URLS only")  # the boundary does what the test relies on
 
 
 def test_rag_server_imports_without_torch():
