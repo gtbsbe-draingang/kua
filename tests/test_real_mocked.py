@@ -1004,3 +1004,22 @@ def test_thresholds_grid_needs_cell_sec(tmp_path):
     p.write_text(json.dumps({**TH_GRID, "cell_sec": 0}))
     with pytest.raises(ValueError, match="cell_sec"):
         real._load_thresholds(p)
+
+
+def test_grid_merge_keeps_best_verified_cell(monkeypatch, tmp_path, rules, clip):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_GRID, "zoom": True})
+    for name in ("ground", "choose"):
+        monkeypatch.setattr(real, name, lambda *a: pytest.fail("VideoJev call"))
+
+    def verify(window, rs, timeout):  # cell 0 unanswered, cell 1 answered
+        return (0.9, "none", "Кассир отходит.") if Path(window).stem == "window1" else (None, "", "")
+    monkeypatch.setattr(real, "verify", verify)
+    monkeypatch.setattr(zoom, "person_box", lambda p, s, e: (100, 100, 300, 500) if s > 0 else None)
+    res = real.analyze(clip, time.time() + 240, lambda s: None)  # cell centres 2 and 5 merge (merge_sec 3)
+    ev, = res.events
+    assert (ev.verify_score, ev.observation, ev.crop, ev.reason) == (
+        0.9, "Кассир отходит.", [100, 100, 300, 500], "verified")
+    assert (ev.t_start, ev.t_end) == (0.0, 6.0)
+    assert ev.timecode == ev.evidence[0].t == pytest.approx(5.0, abs=0.1)  # the second cell's evidence
+    j, = rig.judge_calls
+    assert j["observation"] == "Кассир отходит." and j["evidence"] == ev.evidence

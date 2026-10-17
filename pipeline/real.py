@@ -636,7 +636,10 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
                             type_probs=c.type_probs, verify_score=c.p_yes, kept=kept, reason=reason,
                             observation=c.observation, rank=c.rank, crop=list(c.crop) if c.crop else None,
                             p_rules=c.p_rules))
-    merged = merge_events_indexed(events, float(th["merge_sec"]))
+    # grid cells all have ground_score 0.0, so a merged group is represented by its best verified cell instead
+    # (an unanswered cell counts lowest; the earlier cell wins a tie)
+    best_key = (lambda e: -1.0 if e.verify_score is None else e.verify_score) if grid else None
+    merged = merge_events_indexed(events, float(th["merge_sec"]), best_key)
     events = [ev for ev, _ in merged]
     kept_evs = [(ev, cands[i]) for ev, i in merged if ev.kept]  # each with its best member's candidate
 
