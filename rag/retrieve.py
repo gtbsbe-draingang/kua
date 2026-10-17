@@ -28,7 +28,7 @@ def _load():
             device = "cuda" if torch.cuda.is_available() else "cpu"
             dtype = torch.float16 if device == "cuda" else torch.float32
             tok = AutoTokenizer.from_pretrained(EMBEDDER, local_files_only=True)
-            model = AutoModel.from_pretrained(EMBEDDER, local_files_only=True, torch_dtype=dtype)
+            model = AutoModel.from_pretrained(EMBEDDER, local_files_only=True, dtype=dtype)
             _model = (tok, model.to(device).eval(), device)
         return _model
 
