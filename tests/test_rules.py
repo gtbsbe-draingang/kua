@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from rag import corpus
 from rules import RuleError, citation_text, load_rules
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -126,6 +127,64 @@ def test_no_cited_repealed_acts():
                 assert not REPEALED.search(v), f"{rid}: {field} {v!r}"
                 assert "V14Y0010204" not in v, rid
                 assert not re.search(r"№\s*(58|394)\b", v), f"{rid}: {v!r}"
+
+
+def corpus_citation_problems(rules, in_force, codes):
+    """Citations of corpus acts that do not resolve to an in-force clause of that act.
+
+    `in_force` is what rag/corpus.py loads (suspended and repealed clauses are dropped);
+    `codes` are the act codes of the whole corpus. Citations of other documents are skipped.
+    """
+    problems = []
+    for rid, r in rules.items():
+        for c in r.get("citations") or []:
+            m = re.search(r"/docs/(\w+)", c["url"])
+            if not m or m.group(1) not in codes:
+                continue
+            code = m.group(1)
+            hit = corpus.find_quote(in_force, c["quote"], code)
+            if hit is None:
+                problems.append(f"{rid}: no in-force clause of {code} contains {c['quote'][:60]!r}")
+                continue
+            label = re.match(r"п\. (\d+)", c.get("clause") or "")
+            if label and label.group(1) != hit.num:
+                problems.append(f"{rid}: clause {c['clause']!r} but the quote is in п. {hit.num}")
+    return problems
+
+
+def _corpus_problems(rules):
+    codes = {c.code for c in corpus.load_clauses(in_force_only=False)}
+    return corpus_citation_problems(rules, corpus.load_clauses(), codes)
+
+
+def test_catalogue_citations_resolve_to_in_force_clauses():
+    # a suspended or repealed clause (rag/corpus.py drops them) must not be cited again
+    assert _corpus_problems(load_rules(ROOT / "rules.yaml", strict=True)) == []
+
+
+def test_citing_a_suspended_clause_is_reported():
+    # НБРК № 14 п. 16 is suspended until 2027-01-01: the text is in the act but not in force
+    quote = "каждая касса имеет отдельный вход с закрывающейся на замок дверью"
+    assert corpus.find_quote(corpus.load_clauses(in_force_only=False), quote, "V2000020075")
+    bad = rule(citations=[cit(clause="п. 16, подп. 1)", quote=quote,
+                              url="https://adilet.zan.kz/rus/docs/V2000020075#z121")])
+    problems = _corpus_problems({"r1": bad})
+    assert len(problems) == 1 and "V2000020075" in problems[0]
+
+
+def test_wrong_clause_number_is_reported():
+    quote = "Кассовый узел подлежит изолированию от других производственных, подсобных, подвальных и служебных помещений одним закрывающимся служебным входом."
+    good = rule(citations=[cit(clause="п. 8, ч. 1", quote=quote,
+                               url="https://adilet.zan.kz/rus/docs/V2000020075#z49")])
+    assert _corpus_problems({"r1": good}) == []
+    wrong = rule(citations=[cit(clause="п. 9, ч. 1", quote=quote,
+                                url="https://adilet.zan.kz/rus/docs/V2000020075#z49")])
+    assert len(_corpus_problems({"r1": wrong})) == 1
+
+
+def test_citations_of_documents_outside_the_corpus_are_skipped():
+    other_doc = rule(citations=[cit(url="https://www.nationalbank.kz/ru/news/x", quote="not in any act")])
+    assert _corpus_problems({"r1": other_doc}) == []
 
 
 def test_strict_rejects_todo_quote(tmp_path):
