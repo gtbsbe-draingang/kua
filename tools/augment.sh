@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Make "other camera angle" copies of labelled clips: -tr, -hf, -crop, -dark.
 # Usage: bash tools/augment.sh <clips_dir> <labels_csv> <out_dir> <out_labels_csv> [--only X-1,X-3] [-j N]
+# Env:   FFMPEG=/path/to/ffmpeg   ffmpeg binary (default: ffmpeg)
+#        VIDEO_ENCODER=name       force an encoder: libx264, libopenh264 or mpeg4.
+#                                 Default: first available of libx264, libopenh264, mpeg4.
+#                                 Servers without libx264: VIDEO_ENCODER=mpeg4 bash tools/augment.sh ...
 set -euo pipefail
 
 usage() { sed -n '2,3p' "$0" >&2; exit 2; }
@@ -23,6 +27,33 @@ if "$PY" -c 'import os,sys; sys.exit(0 if os.path.realpath(sys.argv[1])==os.path
 fi
 mkdir -p "$OUT"
 
+FFMPEG="${FFMPEG:-ffmpeg}"
+encoder_args() {  # encoder name -> ffmpeg video-encoder args
+  case "$1" in
+    libx264)     echo "-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p" ;;
+    libopenh264) echo "-c:v libopenh264 -b:v 4M -pix_fmt yuv420p" ;;
+    mpeg4)       echo "-c:v mpeg4 -q:v 2 -pix_fmt yuv420p" ;;
+    *) return 1 ;;
+  esac
+}
+if [ -n "${VIDEO_ENCODER:-}" ]; then
+  encoder_args "$VIDEO_ENCODER" >/dev/null || {
+    echo "augment: VIDEO_ENCODER must be libx264, libopenh264 or mpeg4 (got '$VIDEO_ENCODER')" >&2; exit 2; }
+  ENCODER="$VIDEO_ENCODER"
+else
+  ENCODER=""
+  ENCODERS="$("$FFMPEG" -hide_banner -encoders 2>/dev/null || true)"
+  for e in libx264 libopenh264 mpeg4; do
+    if printf '%s\n' "$ENCODERS" | awk -v e="$e" '$2==e{found=1} END{exit !found}'; then
+      ENCODER="$e"; break
+    fi
+  done
+  [ -n "$ENCODER" ] || { echo "augment: no usable encoder in '$FFMPEG' (need libx264, libopenh264 or mpeg4)" >&2; exit 1; }
+fi
+echo "augment: encoder $ENCODER" >&2
+export FFMPEG ENCODER
+export -f encoder_args
+
 vf_for() {
   case "$1" in
     tr) echo "transpose=1" ;;
@@ -39,8 +70,9 @@ make_one() {  # clip src variant filter outdir
     echo "skip  $clip-$v"; return 0
   fi
   rm -f "$tmp"
-  if ffmpeg -nostdin -hide_banner -loglevel error -y -i "$src" -vf "$vf" \
-       -threads 2 -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -an -movflags +faststart "$tmp" \
+  local -a enc; read -ra enc <<<"$(encoder_args "$ENCODER")"
+  if "$FFMPEG" -nostdin -hide_banner -loglevel error -y -i "$src" -vf "$vf" \
+       -threads 2 "${enc[@]}" -an -movflags +faststart "$tmp" \
      && mv "$tmp" "$dst"; then
     echo "made  $clip-$v"
   else
