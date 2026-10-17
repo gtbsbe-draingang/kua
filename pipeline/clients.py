@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import threading
 
 import httpx
 
@@ -70,6 +71,7 @@ def _post(url: str, body: dict, timeout: float):
 
 
 _pool: replicas.Pool | None = None
+_pool_lock = threading.Lock()
 
 
 def iv3_urls() -> list[str]:
@@ -79,16 +81,19 @@ def iv3_urls() -> list[str]:
 
 def _reset_pool() -> None:
     global _pool
-    _pool = None
+    with _pool_lock:
+        _pool = None
 
 
 def _iv3_pool() -> replicas.Pool:
     """The process's pool, created on first use. It is rebuilt when the environment names other URLs."""
     global _pool
     urls = iv3_urls()
-    if _pool is None or _pool.urls != urls:
-        _pool = replicas.Pool(urls)
-    return _pool
+    with _pool_lock:
+        pool = _pool
+        if pool is None or pool.urls != urls:
+            pool = _pool = replicas.Pool(urls)
+        return pool
 
 
 def _post_iv3(body: dict, timeout: float):

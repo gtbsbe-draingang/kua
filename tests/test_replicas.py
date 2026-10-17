@@ -151,3 +151,19 @@ def test_iv3_urls_default_and_urls_env(monkeypatch):
     monkeypatch.setenv("IV3_URL", "http://x/verify")
     monkeypatch.setenv("IV3_URLS", f"{A}, {B}")
     assert clients.iv3_urls() == [A, B]
+
+
+def test_iv3_pool_is_one_object_under_a_burst(monkeypatch):
+    monkeypatch.setenv("IV3_URLS", f"{A},{B}")
+    n = 16
+    start = threading.Barrier(n)
+    got = []
+
+    def grab():
+        start.wait()
+        got.append(clients._iv3_pool())
+
+    threads = [threading.Thread(target=grab) for _ in range(n)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(got) == n and all(p is got[0] for p in got)
