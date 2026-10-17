@@ -85,7 +85,12 @@ start() {
   echo "[$(date -u '+%F %T')] start judge llm ($free MiB of GPU memory free, --mem-fraction-static $fraction)" >>"$LOG"
   # setsid: its own session, so stop can find every process it spawned. 8>&-: the server must not keep the lock.
   # PATH: SGLang compiles its JIT kernels with ninja, which lives in env/vlm/bin (nvcc and gcc come from env.sh).
-  PATH="$MTA_ROOT/env/vlm/bin:$PATH" OMP_NUM_THREADS=4 setsid nohup "$PY" -m sglang.launch_server \
+  # LD_PRELOAD: those kernels are built by the toolchain's gcc 13 and need its libstdc++ (GLIBCXX_3.4.31), newer
+  # than the pod's. A preload of just the two runtime libraries, not LD_LIBRARY_PATH: the toolchain's lib dir also
+  # holds a libcudart 12.8 that would shadow the one torch uses.
+  PATH="$MTA_ROOT/env/vlm/bin:$PATH" OMP_NUM_THREADS=4 \
+    LD_PRELOAD="$MTA_ROOT/env/toolchain/lib/libgcc_s.so.1:$MTA_ROOT/env/toolchain/lib/libstdc++.so.6" \
+    setsid nohup "$PY" -m sglang.launch_server \
     --model-path "$MODEL_PATH" --served-model-name "$SERVED_NAME" \
     --host 127.0.0.1 --port "$PORT" \
     --mem-fraction-static "$fraction" --context-length 32768 \
