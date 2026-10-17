@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from python_multipart.multipart import MultipartParser, parse_options_header
 
 import jobs
@@ -26,11 +28,16 @@ log = logging.getLogger(__name__)
 CHUNK = 1024 * 1024
 DEADLINE_SEC = 240
 JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
-STATIC_INDEX = Path(__file__).resolve().parent / "static" / "index.html"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def _r1(x: float) -> float:
     return round(float(x), 1)
+
+
+def video_token(api_key: str, job_id: str) -> str:
+    """Per-job token that lets a <video src> (which cannot send X-API-Key) fetch that job's video."""
+    return hmac.new(api_key.encode(), job_id.encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def to_api(job_id: str, result: PipelineResult, rules: dict) -> dict:
@@ -60,6 +67,11 @@ def to_api(job_id: str, result: PipelineResult, rules: dict) -> dict:
             "type_id": rid,
             "rule": {k: c.get(k, "") for k in ("document", "clause", "quote", "url")},
             "confidence": round(float(score), 2),
+            "observation": (ev.observation or "").strip(),
+            "justification": (ev.justification or "").strip(),
+            "type_source": ev.type_source,
+            "t_start": _r1(ev.t_start),
+            "t_end": _r1(ev.t_end),
         })
     return {"job_id": job_id, "status": "done", "verdict": result.verdict, "violations": violations}
 
@@ -106,9 +118,15 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
 
     app = FastAPI(lifespan=lifespan)
 
+    def key_ok(x_api_key: str | None) -> bool:
+        return x_api_key is not None and hmac.compare_digest(x_api_key.encode(), api_key.encode())
+
     def check_key(x_api_key: str | None = Header(default=None)) -> None:
-        if x_api_key is None or not hmac.compare_digest(x_api_key.encode(), api_key.encode()):
+        if not key_ok(x_api_key):
             raise HTTPException(status_code=401, detail="invalid or missing API key")
+
+    def video_url(job_id: str) -> str:
+        return f"/api/v1/jobs/{job_id}/video?token={video_token(api_key, job_id)}"
 
     @app.get("/healthz")
     def healthz():
@@ -116,9 +134,15 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
 
     @app.get("/")
     def index():
-        if not STATIC_INDEX.is_file():
+        index_html = STATIC_DIR / "index.html"
+        if not index_html.is_file():
             raise HTTPException(status_code=404, detail="UI not installed")
-        return FileResponse(STATIC_INDEX)
+        return FileResponse(index_html)
+
+    # fonts, ui.css and ui.js. StaticFiles fails every request with a 500 when its folder is missing, so
+    # mount it only when the folder exists; otherwise /static/... is a plain 404, like "/" without an index
+    if STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     async def receive_upload(request: Request, out_path: Path) -> None:
         """Stream the multipart body, writing only the `file` part to out_path."""
@@ -217,20 +241,40 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
             raise HTTPException(status_code=404, detail="unknown job")
         status = state.get("status")
         if status == "failed":
-            return {"job_id": job_id, "status": "failed", "error": state.get("error") or "unknown error"}
+            return {"job_id": job_id, "status": "failed", "error": state.get("error") or "unknown error",
+                    "video_url": video_url(job_id)}
         if status != "done":
-            return {"job_id": job_id, "status": "processing", "stage": state.get("stage")}
+            try:
+                elapsed = round(time.time() - float(state["created_at"]), 1)
+            except (KeyError, TypeError, ValueError):
+                elapsed = None
+            return {"job_id": job_id, "status": "processing", "stage": state.get("stage"),
+                    "video_url": video_url(job_id), "elapsed_sec": elapsed}
         try:
             body = json.loads((d / "result.json").read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             return {"job_id": job_id, "status": "failed",
-                    "error": f"result unavailable: {type(e).__name__}: {e}"}
+                    "error": f"result unavailable: {type(e).__name__}: {e}", "video_url": video_url(job_id)}
+        body["video_url"] = video_url(job_id)
         if debug:
             try:
                 body["debug"] = json.loads((d / "debug.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 pass
         return body
+
+    @app.get("/api/v1/jobs/{job_id}/video")
+    def get_video(job_id: str, token: str = "", x_api_key: str | None = Header(default=None)):
+        # <video src> cannot send headers, so the per-job token from the job response also authorises
+        token_ok = hmac.compare_digest(token.encode(), video_token(api_key, job_id).encode())
+        if not (token_ok or key_ok(x_api_key)):
+            raise HTTPException(status_code=401, detail="invalid or missing token")
+        if not JOB_ID_RE.match(job_id):
+            raise HTTPException(status_code=404, detail="unknown job")
+        path = jobs_dir / job_id / "input.mov"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="unknown job")
+        return FileResponse(path, media_type="video/mp4")  # FileResponse answers Range requests (seeking)
 
     return app
 
