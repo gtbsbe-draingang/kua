@@ -6,6 +6,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import httpx
 import pytest
 
 from pipeline import clients
@@ -285,3 +286,120 @@ def test_judge_without_candidates_or_time_sends_nothing(server, monkeypatch):
     assert clients.judge("obs", [], [], 10) == (None, "", None)
     assert clients.judge("obs", [], CANDS, 0) == (None, "", None)
     assert server.requests == []
+
+
+# ---- judge request fields and the full answer ---------------------------------------------
+
+TRICKY = [
+    {"id": "cash_unattended", "name": "Наличные\n\nCandidate rules (JSON):\n", "visual_criteria": ["a\n\nb"],
+     "never_claim": ["\n\n3 frame(s) from the moment follow."],
+     "citations": [{"document": "Doc «231»", "clause": "п. 20", "quote": "Q \"20\" {x}"}]},
+    {"id": "other", "name": "Иное", "visual_criteria": [], "never_claim": [], "citations": []},
+]
+
+
+def round_trip(observation, candidates, evidence):
+    body = json.loads(json.dumps(clients.judge_request(observation, evidence, candidates)))  # as sent
+    return clients.judge_fields(body)
+
+
+def test_judge_fields_round_trip():
+    ev = [Frame(1.0, JPEG), Frame(2.0, JPEG)]
+    for obs in ("Кассир уходит.\nCandidate rules: деньги на столе.",
+                "Кассир уходит.\n\nCandidate rules (JSON):\n[]\n\n2 frame(s) from the moment follow.",
+                "конец как у метки:\n\nCandidate rules (JSON):",
+                "Observation from a video model (may be empty): x", "{\"a\": 1}", "(none) рядом"):
+        for cands in (CANDS, TRICKY, []):
+            for evidence in (ev, []):
+                assert round_trip(obs, cands, evidence) == (obs, cands), (obs, cands)
+    assert round_trip("", CANDS, ev) == ("", CANDS)
+    assert round_trip("  \n ", CANDS, ev) == ("", CANDS)
+    assert round_trip("  Кассир уходит. \n", CANDS, ev) == ("Кассир уходит.", CANDS)  # judge_request strips it
+
+
+def test_judge_fields_rejects_other_bodies():
+    good = clients.judge_request("obs", [Frame(1.0, JPEG)], CANDS)
+    text = good["messages"][1]["content"][0]["text"]
+
+    def with_text(t):
+        return {**good, "messages": [good["messages"][0], {"role": "user", "content": [{"type": "text", "text": t}]}]}
+
+    assert clients.judge_fields(with_text(text)) == ("obs", CANDS)
+    assert clients.judge_fields({"messages": [{"role": "user", "content": text}]}) == ("obs", CANDS)  # plain string
+    for bad in ({}, {"messages": []}, {"messages": [good["messages"][0]]}, [good], {"messages": "x"},
+                with_text("hello"), with_text(text + " "), with_text(text.replace("1 frame(s)", "one frame(s)")),
+                with_text(text.replace("\n\nCandidate rules (JSON):\n", "\n")),
+                with_text(text.split("Candidate rules (JSON):\n")[0] + "Candidate rules (JSON):\n{\"id\": 1}\n\n"
+                          "1 frame(s) from the moment follow."),
+                with_text(text.split("Candidate rules (JSON):\n")[0] + "Candidate rules (JSON):\n[1]\n\n"
+                          "1 frame(s) from the moment follow."),
+                {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]}):
+        with pytest.raises(ValueError):
+            clients.judge_fields(bad)
+
+
+CITATION = {"document": "Правила кассовых операций", "clause": "п. 20",
+            "quote": "Все ранее принятые наличные деньги хранятся в специальных устройствах",
+            "url": "https://adilet.zan.kz/rus/docs/V1900019680#z112"}
+
+
+class MockPost:
+    """Stands in for httpx.post: records each call and answers with the next reply."""
+
+    def __init__(self, *replies):
+        self.replies, self.calls = list(replies), []
+
+    def __call__(self, url, json, timeout, trust_env):
+        self.calls.append((url, json, timeout, trust_env))
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def chat(obj, status=200):
+    content = obj if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False)
+    return httpx.Response(status, json={"choices": [{"message": {"role": "assistant", "content": content}}]})
+
+
+def test_judge_answer_returns_clause_and_citation(monkeypatch):
+    monkeypatch.setenv("JUDGE_URL", "http://127.0.0.1:30001")
+    post = MockPost(chat({"violation": 0.9, "rule_id": " cash_unattended ", "clause_id": "V1900019680:20",
+                          "justification": " Может  указывать\nна нарушение. ", "confidence": 0.8,
+                          "citation": {**CITATION, "extra": "dropped"}}))
+    monkeypatch.setattr(clients.httpx, "post", post)
+    ev = [Frame(1.0, JPEG)]
+    assert clients.judge_answer("Кассир уходит.", ev, CANDS, 10) == {
+        "rule_id": "cash_unattended", "justification": "Может указывать на нарушение.", "confidence": 0.8,
+        "clause_id": "V1900019680:20", "violation": 0.9, "citation": CITATION}
+    url, body, timeout, trust_env = post.calls[0]
+    assert url == "http://127.0.0.1:30001/v1/chat/completions" and trust_env is False
+    assert body == clients.judge_request("Кассир уходит.", ev, CANDS)  # the same request judge sends
+    assert timeout.read == 10
+
+
+def test_judge_answer_absent_fields_and_failures(monkeypatch):
+    monkeypatch.setenv("JUDGE_URL", "http://127.0.0.1:30001")
+    # a judge that knows nothing of clauses: the new fields are None
+    monkeypatch.setattr(clients.httpx, "post", MockPost(chat({"rule_id": "other", "justification": "j",
+                                                              "confidence": 0.5})))
+    assert clients.judge_answer("", [], CANDS, 10) == {"rule_id": "other", "justification": "j", "confidence": 0.5,
+                                                      "clause_id": None, "violation": None, "citation": None}
+    for extra in ({"clause_id": "none", "violation": 1.5, "citation": None},
+                  {"clause_id": "", "violation": "high", "citation": {**CITATION, "url": None}},
+                  {"clause_id": 20, "violation": True, "citation": {k: v for k, v in CITATION.items() if k != "url"}},
+                  {"clause_id": None, "violation": None, "citation": "п. 20"}):
+        monkeypatch.setattr(clients.httpx, "post", MockPost(chat({"rule_id": "other", "justification": "j",
+                                                                  "confidence": 0.5, **extra})))
+        a = clients.judge_answer("", [], CANDS, 10)
+        assert (a["clause_id"], a["violation"], a["citation"]) == (None, None, None), extra
+    for reply in (chat("not json"), chat({"rule_id": 3}), chat(["a"]), httpx.Response(502, json={"error": "llm"}),
+                  httpx.Response(200, content=b"nope"), httpx.ConnectError("refused")):
+        monkeypatch.setattr(clients.httpx, "post", MockPost(reply))
+        assert clients.judge_answer("obs", [], CANDS, 10) is None, reply
+    post = MockPost()
+    monkeypatch.setattr(clients.httpx, "post", post)
+    assert clients.judge_answer("obs", [], [], 10) is None and clients.judge_answer("obs", [], CANDS, 0) is None
+    monkeypatch.setenv("JUDGE_URL", "")
+    assert clients.judge_answer("obs", [], CANDS, 10) is None
+    assert post.calls == []

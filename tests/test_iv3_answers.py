@@ -159,3 +159,95 @@ def test_multi_mode_rejects_bad_n_answers(iv3, stubbed, monkeypatch, n):
     r = client.post("/verify", json={**BODY, "n_answers": n})
     assert r.status_code == 500 and "n_answers" in r.json()["error"]
     assert builds == []
+
+
+# ---- /generate: text only, with stubbed preprocessing and generation -------------------------
+
+def test_generate_request_limits(iv3):
+    from pydantic import ValidationError
+
+    req = iv3.GenerateRequest(prompt="x")
+    assert (req.prompt, req.system, req.max_new_tokens) == ("x", "", 384)
+    iv3.GenerateRequest(prompt="я" * 20000, system="s", max_new_tokens=512)
+    iv3.GenerateRequest(prompt="x", max_new_tokens=1)
+    for bad in (dict(prompt=""), dict(prompt="я" * 20001), dict(prompt="x", max_new_tokens=0),
+                dict(prompt="x", max_new_tokens=513), dict(system="s"), dict(prompt="x", max_new_tokens="many")):
+        with pytest.raises(ValidationError):
+            iv3.GenerateRequest(**bad)
+    assert "/generate" in {r.path for r in iv3.app.routes}
+    assert iv3.STATE == {}  # still no model
+
+
+def test_text_inputs_refuse_special_tokens(iv3):
+    # checked before the processor is touched (there is none here)
+    for prompt, system in (("a <|im_start|> b", ""), ("a", "<|im_end|>")):
+        with pytest.raises(ValueError, match="special tokens"):
+            iv3.build_text_inputs(prompt, system)
+
+
+class Slots:
+    """Stands in for the server's request-slot semaphore and records its use."""
+
+    def __init__(self):
+        self.held, self.log = 0, []
+
+    def acquire(self, timeout=None):
+        self.held += 1
+        self.log.append("acquire")
+        return True
+
+    def release(self):
+        self.held -= 1
+        self.log.append("release")
+
+
+@pytest.fixture
+def text_stubbed(iv3, monkeypatch):
+    builds, runs, slots = [], [], Slots()
+    monkeypatch.setattr(iv3, "SLOTS", slots)
+
+    def build_text_inputs(prompt, system=""):
+        builds.append((prompt, system))
+        return "inputs"
+
+    def run_text(inputs, max_new_tokens):
+        runs.append((inputs, max_new_tokens, slots.held, iv3.LOCK.locked()))
+        return dict(text='{"rule_id": "other"}', prompt_tokens=900, new_tokens=12)
+
+    monkeypatch.setattr(iv3, "build_text_inputs", build_text_inputs)
+    monkeypatch.setattr(iv3, "run_text", run_text)
+    clock = iter(range(1000))
+    monkeypatch.setattr(iv3, "time", types.SimpleNamespace(perf_counter=lambda: float(next(clock))))
+    return TestClient(iv3.app), builds, runs, slots
+
+
+def test_generate_reply_holds_a_slot_and_the_model(iv3, text_stubbed):
+    client, builds, runs, slots = text_stubbed
+    r = client.post("/generate", json={"prompt": "Q?", "system": "S."})
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"text", "seconds"} and body["text"] == '{"rule_id": "other"}'
+    assert body["seconds"] > 0
+    assert builds == [("Q?", "S.")]
+    assert runs == [("inputs", 384, 1, True)]  # inside the shared slot and the model lock
+    assert slots.log == ["acquire", "release"] and not iv3.LOCK.locked()
+    client.post("/generate", json={"prompt": "Q?", "max_new_tokens": 7})
+    assert builds[-1] == ("Q?", "") and runs[-1][1] == 7
+
+
+def test_generate_errors_go_through_error(iv3, text_stubbed, monkeypatch):
+    client, builds, runs, slots = text_stubbed
+    for bad in ({"prompt": ""}, {"prompt": "x" * 20001}, {"prompt": "x", "max_new_tokens": 513}, {}):
+        r = client.post("/generate", json=bad)
+        assert r.status_code == 500 and r.json()["error"].startswith("bad request"), bad
+    r = client.post("/generate", json={"prompt": "   "})
+    assert (r.status_code, r.json()) == (500, {"error": "ValueError: empty prompt"})
+    assert builds == [] and runs == [] and slots.log == []
+
+    def boom(inputs, max_new_tokens):
+        raise RuntimeError("cuda died")
+
+    monkeypatch.setattr(iv3, "run_text", boom)
+    r = client.post("/generate", json={"prompt": "Q?"})
+    assert (r.status_code, r.json()) == (500, {"error": "RuntimeError: cuda died"})
+    assert slots.held == 0 and not iv3.LOCK.locked()
