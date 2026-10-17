@@ -5,7 +5,8 @@
 GET  /healthz -> {"ok": true, "clauses": n, "passages": m}. The port opens only after every
      in-force clause has been embedded, so a reachable /healthz means ready.
 POST /v1/chat/completions with a clients.judge_request body (the frames are not used)
-     -> {"model": "rag+iv3", "choices": [{"message": {"role": "assistant", "content": <JSON>}}]}
+     -> {"model": "rag+iv3" ("rag+<RAG_LLM_MODEL>" with RAG_LLM_KIND=openai),
+         "choices": [{"message": {"role": "assistant", "content": <JSON>}}]}
      where the content is {violation, rule_id, clause_id, justification, confidence, citation}.
      A body it cannot read -> 400 {"error": "bad request: ..."}; the LLM failing -> 502
      {"error": "llm"}; an answer without a candidate rule_id -> 502 {"error": "bad answer"}.
@@ -169,11 +170,18 @@ class RetrieveRequest(BaseModel):
     k: int = Field(TOP_K, ge=1, le=20)
 
 
-def create_app(index=None, llm: LLM | None = None, llm_timeout: float = LLM_TIMEOUT, lifespan=None) -> FastAPI:
+def llm_label(kind: str, model: str) -> str:
+    """The "model" of a judge response: the backend that answered, rag+iv3 or rag+<served model name>."""
+    return f"rag+{model}" if kind == "openai" else MODEL
+
+
+def create_app(index=None, llm: LLM | None = None, llm_timeout: float = LLM_TIMEOUT, lifespan=None,
+               model_label: str = MODEL) -> FastAPI:
     """The server over index (rag.retrieve.Index or anything with .clauses, .by_id, .search and .search_many) and
-    llm. The module's app passes neither and fills both in its lifespan."""
+    llm, answering with "model": model_label. The module's app passes none of these and fills them in its lifespan."""
     app = FastAPI(title="rag", lifespan=lifespan)
     app.state.index, app.state.llm, app.state.llm_timeout = index, llm, llm_timeout
+    app.state.model_label = model_label
 
     def bad(message: str) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": f"bad request: {message}"})
@@ -219,7 +227,7 @@ def create_app(index=None, llm: LLM | None = None, llm_timeout: float = LLM_TIME
         log.info("judge | %d hits, %d clauses offered (%d prompt chars) | rule %s clause %s violation %s "
                  "confidence %s | retrieve %.2fs llm %.2fs", len(hits), len(clauses), len(prompt),
                  answer["rule_id"], cid or "-", answer["violation"], answer["confidence"], t1 - t0, t2 - t1)
-        return {"model": MODEL,
+        return {"model": app.state.model_label,
                 "choices": [{"message": {"role": "assistant", "content": json.dumps(answer, ensure_ascii=False)}}]}
 
     @app.post("/retrieve")
@@ -246,6 +254,7 @@ async def lifespan(app: FastAPI):
     urls = replicas.parse_urls(os.environ.get("RAG_LLM_URLS"),
                                os.environ.get("RAG_LLM_URL", CHAT_URL if kind == "openai" else LLM_URL))
     app.state.llm = make_llm(kind, urls, model)
+    app.state.model_label = llm_label(kind, model)
     app.state.llm_timeout = float(os.environ.get("RAG_LLM_TIMEOUT", LLM_TIMEOUT))
     log.info("LLM %s%s at %s, timeout %.0f s", kind, f" {model}" if kind == "openai" else "", ", ".join(urls),
              app.state.llm_timeout)

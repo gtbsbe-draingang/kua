@@ -167,6 +167,15 @@ def test_rag_server_answers_through_the_openai_backend(posts):
     assert "other" in sent["messages"][1]["content"] and timeout.read == 7.5
 
 
+def test_response_model_label_is_the_apps_label(posts):
+    posts.replies += [chat_reply(json.dumps(ANSWER)), chat_reply(json.dumps(ANSWER))]
+    llm = rag_server.openai_llm(CHAT_URL, "m")
+    default = TestClient(rag_server.create_app(OneClauseIndex(), llm))
+    assert default.post("/v1/chat/completions", json=judge_body()).json()["model"] == "rag+iv3"
+    labelled = TestClient(rag_server.create_app(OneClauseIndex(), llm, model_label="rag+m"))
+    assert labelled.post("/v1/chat/completions", json=judge_body()).json()["model"] == "rag+m"
+
+
 def test_rag_server_openai_failures_are_a_502(posts):
     posts.replies += [httpx.Response(500, json={}), httpx.ReadTimeout("slow"), chat_reply("<think>только мысли"),
                       chat_reply("не JSON")]
@@ -240,7 +249,8 @@ def judge_once(client):
 def test_startup_defaults_to_the_generate_backend(started, posts):
     posts.replies.append(httpx.Response(200, json={"text": json.dumps(ANSWER)}))
     with TestClient(rag_server.app) as client:
-        assert judge_once(client).status_code == 200
+        r = judge_once(client)
+        assert r.status_code == 200 and r.json()["model"] == "rag+iv3"
     url, sent, _, _ = posts.sent[0]
     assert url == "http://127.0.0.1:30000/generate" and sent.keys() == {"system", "prompt", "max_new_tokens"}
 
@@ -249,7 +259,8 @@ def test_startup_openai_kind(started, posts):
     started.setenv("RAG_LLM_KIND", "openai")
     posts.replies.append(chat_reply(json.dumps(ANSWER)))
     with TestClient(rag_server.app) as client:
-        assert judge_once(client).status_code == 200
+        r = judge_once(client)
+        assert r.status_code == 200 and r.json()["model"] == "rag+qwen3.5-9b"  # labelled by the backend's model
     url, sent, _, _ = posts.sent[0]
     assert url == CHAT_URL  # the judge LLM's own address is the default for this kind
     assert sent["model"] == "qwen3.5-9b" and "messages" in sent
@@ -261,7 +272,8 @@ def test_startup_openai_kind_reads_model_and_urls(started, posts):
     started.setenv("RAG_LLM_URLS", "http://127.0.0.1:7/v1/chat/completions")
     posts.replies.append(chat_reply(json.dumps(ANSWER)))
     with TestClient(rag_server.app) as client:
-        assert judge_once(client).status_code == 200
+        r = judge_once(client)
+        assert r.status_code == 200 and r.json()["model"] == "rag+other-model"
     assert posts.sent[0][0] == "http://127.0.0.1:7/v1/chat/completions" and posts.sent[0][1]["model"] == "other-model"
 
 
