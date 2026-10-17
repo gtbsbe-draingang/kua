@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 MODEL_ID = os.environ.get("VIDEOJEV_MODEL", "ZhuYuhan/VideoJev-4B")
 REVISION = os.environ.get("VIDEOJEV_REVISION") or None
 DEVICE = os.environ.get("VIDEOJEV_DEVICE", "cuda:0")
+# 2: warm Х-14 (142.5 s, 43 queries) on the pod took 55.9 s; at 4, grounding took 62.3 s and the check server OOMed.
 GROUND_FPS = float(os.environ.get("GROUND_FPS", "2.0"))
 GROUND_CONTEXT = int(os.environ.get("GROUND_CONTEXT", "147456"))  # USAGE.md grounding setting
 CHOICE_FPS = float(os.environ.get("CHOICE_FPS", "2.0"))  # USAGE.md QA setting
