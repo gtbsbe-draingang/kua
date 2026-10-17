@@ -21,9 +21,11 @@ that reading. Each citation URL carries a `#zNNN` paragraph anchor taken from th
 
 Act 1 is the basis of 13 of the 14 detectable rules and of all non-detectable ones. Act 2 is used by
 `unauthorized_person_in_cash_area` and, at document level, by `other`. Note on Act 2: № 88
-suspends until 01.01.2027 its new wording of pp. 11, 13 подп. 3), 14 and 16; the interim wording
-printed on adilet applies until then, and the only sub-clause quoted from p. 16 (подп. 1)) reads
-the same in both wordings.
+suspends until 01.01.2027 its new wording of pp. 11, 13 подп. 3), 14 and 16. The corpus
+(`rag/acts/V2000020075.json`) marks pp. 11, 14 and 16 as suspended, so the retrieval corpus drops
+them and `rules.yaml` cites none of them.
+`tests/test_rules.py::test_catalogue_citations_resolve_to_in_force_clauses` guards this for every
+cited clause of every act in the corpus.
 
 Checked and deliberately **not cited**: НБРК № 58 of 03.03.2001 and № 394 of 15.11.1999
 (repealed, replaced by № 231); НБРК № 247 of 24.12.2014 (V14Y0010204: repealed and covers only the
@@ -59,11 +61,11 @@ clause. Every flag is a hint for a human reviewer, not a finding.
 | `deposit_counted_without_client` | Пересчёт принимаемых наличных вне присутствия клиента | the cashier takes the client's cash away from the counter before counting it; the cash is counted only after the client has left; the client cannot see the counting | п. 20, ч. 1 |
 | `withdrawal_not_counted` | Выдача наличных без пересчёта в присутствии клиента | the cashier hands cash to the client; loose banknotes or an opened or partial bundle are handed over without being counted in front of the client; a full bundle in intact bank wrapping is not a violation: it may be issued by the amount on the wrapper without a sheet count | п. 31, подп. 4); п. 32, ч. 1 |
 | `recount_without_controller` | Пересчёт, сортировка или упаковка наличных без контролирующего работника | no client is being served; the cashier counts, sorts, bands or packs cash; no second employee watches the counting | п. 42 |
-| `unauthorized_person_in_cash_area` | Доступ постороннего лица в зону кассы | a person who is not the cashier (a client or another visitor) enters the cashier's workspace; a client reaches across the counter and takes or touches cash, drawers or documents on the cashier's side; the cashier does not stop it | п. 8, ч. 1; п. 16, подп. 1) |
+| `unauthorized_person_in_cash_area` | Доступ постороннего лица в зону кассы | a person who is not the cashier (a client or another visitor) enters the cashier's workspace; a client reaches across the counter and takes or touches cash, drawers or documents on the cashier's side; the cashier does not stop it | п. 8, ч. 1 |
 | `collection_cash_not_in_sealed_bag` | Передача наличных инкассатору без опломбированной сумки | cash is handed between the cashier and a cash collector as loose banknotes or open bundles; the collection bag is open, not tied or has no seal when it is handed over; cash is put into the bag after the handover and the bag is not sealed | п. 105; п. 93, ч. 1 |
 | `collection_bag_not_inspected` | Приём инкассаторской сумки без проверки целостности и пломбы | a cash collector and the cashier exchange a collection bag; the receiving side puts the bag away or opens it without looking at the bag and its seal; no visible inspection of the seal, the twine or the bag's integrity | п. 24, ч. 2, подп. 3); п. 24, ч. 2, подп. 4); п. 107, подп. 2) |
 
-Clauses of Act 2 (№ 14) are used by `unauthorized_person_in_cash_area` (п. 8 ч. 1, п. 16 подп. 1))
+Clauses of Act 2 (№ 14) are used by `unauthorized_person_in_cash_area` (п. 8 ч. 1)
 and by the document-level citation in `other`; every other clause above belongs to № 231.
 `other` has an empty `clause`: it cites the act as a whole.
 
@@ -88,9 +90,10 @@ never emitted as flags.
 
 - **`unauthorized_person_in_cash_area` is an inference.** Neither act says in words that outsiders
   may not enter the cash desk (№ 231 п. 75 restricts entry only to the vault and safe room). The
-  rule rests on № 14 п. 8 and п. 16 подп. 1), which require the cash unit to be isolated and each
-  cash room to have its own lockable entrance. Its `why` text keeps the hedge "может указывать на
-  нарушение".
+  rule rests on № 14 п. 8, which requires the cash unit to be isolated from other premises by one
+  lockable service entrance. It deliberately does not cite п. 16 подп. 1) (a separate lockable
+  entrance for each cash room): п. 16 is suspended until 01.01.2027. Its `why` text keeps the
+  hedge "может указывать на нарушение".
 - **`recount_without_controller` has a high false-positive risk.** The controlling employee may be
   out of frame, and preparing a client's withdrawal is excluded by the clause itself (п. 42).
 - **`personal_items_at_workplace`:** п. 12 ч. 2 permits communication devices without photo or video

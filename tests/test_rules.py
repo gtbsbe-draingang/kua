@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from rag import corpus
 from rules import RuleError, citation_text, load_rules
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -126,6 +127,89 @@ def test_no_cited_repealed_acts():
                 assert not REPEALED.search(v), f"{rid}: {field} {v!r}"
                 assert "V14Y0010204" not in v, rid
                 assert not re.search(r"№\s*(58|394)\b", v), f"{rid}: {v!r}"
+
+
+# Citation urls that may point at a document outside the corpus (none for now). Any other
+# citation must name an act of the corpus, so a mistyped act code in a url fails the test.
+OUTSIDE_CORPUS_URLS = frozenset()
+
+
+def corpus_citation_problems(rules, in_force, codes, outside=frozenset()):
+    """Citations that do not resolve to an in-force clause of a corpus act.
+
+    `in_force` is what rag/corpus.py loads (suspended and repealed clauses are dropped);
+    `codes` are the act codes of the whole corpus. A citation whose url does not name one of
+    them is a problem unless the url is in `outside`.
+    """
+    problems = []
+    for rid, r in rules.items():
+        for c in r.get("citations") or []:
+            m = re.search(r"/docs/(\w+)", c["url"])
+            code = m.group(1) if m else None
+            if code not in codes:
+                if c["url"] not in outside:
+                    problems.append(f"{rid}: {c['url']!r} names no act of the corpus")
+                continue
+            hit = corpus.find_quote(in_force, c["quote"], code)
+            if hit is None:
+                problems.append(f"{rid}: no in-force clause of {code} contains {c['quote'][:60]!r}")
+                continue
+            label = re.match(r"п\. (\d+(?:-\d+)?)", c.get("clause") or "")
+            if label and label.group(1) != hit.num:
+                problems.append(f"{rid}: clause {c['clause']!r} but the quote is in п. {hit.num}")
+    return problems
+
+
+def _corpus_problems(rules, outside=OUTSIDE_CORPUS_URLS):
+    codes = {c.code for c in corpus.load_clauses(in_force_only=False)}
+    return corpus_citation_problems(rules, corpus.load_clauses(), codes, outside)
+
+
+def test_catalogue_citations_resolve_to_in_force_clauses():
+    # a suspended or repealed clause (rag/corpus.py drops them) must not be cited again
+    assert _corpus_problems(load_rules(ROOT / "rules.yaml", strict=True)) == []
+
+
+def test_citing_a_suspended_clause_is_reported():
+    # НБРК № 14 п. 16 is suspended until 2027-01-01: the text is in the act but not in force
+    quote = "каждая касса имеет отдельный вход с закрывающейся на замок дверью"
+    assert corpus.find_quote(corpus.load_clauses(in_force_only=False), quote, "V2000020075")
+    bad = rule(citations=[cit(clause="п. 16, подп. 1)", quote=quote,
+                              url="https://adilet.zan.kz/rus/docs/V2000020075#z121")])
+    problems = _corpus_problems({"r1": bad})
+    assert len(problems) == 1 and "V2000020075" in problems[0]
+
+
+def test_wrong_clause_number_is_reported():
+    quote = "Кассовый узел подлежит изолированию от других производственных, подсобных, подвальных и служебных помещений одним закрывающимся служебным входом."
+    good = rule(citations=[cit(clause="п. 8, ч. 1", quote=quote,
+                               url="https://adilet.zan.kz/rus/docs/V2000020075#z49")])
+    assert _corpus_problems({"r1": good}) == []
+    wrong = rule(citations=[cit(clause="п. 9, ч. 1", quote=quote,
+                                url="https://adilet.zan.kz/rus/docs/V2000020075#z49")])
+    assert len(_corpus_problems({"r1": wrong})) == 1
+
+
+def test_hyphenated_clause_numbers_are_matched_whole():
+    quote = "Банк, инкассаторская организация, использующие спецконтейнеры, принимают от клиента банкноты"
+    url = "https://adilet.zan.kz/rus/docs/V1900019680#z463"
+    assert _corpus_problems({"r1": rule(citations=[cit(clause="п. 63-1, ч. 2", quote=quote, url=url)])}) == []
+    prefix_only = rule(citations=[cit(clause="п. 63", quote=quote, url=url)])
+    assert len(_corpus_problems({"r1": prefix_only})) == 1
+
+
+@pytest.mark.parametrize("url", ["https://adilet.zan.kz/rus/docs/V2000020076#z49",  # mistyped act code
+                                 "https://adilet.zan.kz/rus/",                      # no /docs/
+                                 "https://www.nationalbank.kz/ru/news/x"])
+def test_citation_of_a_document_outside_the_corpus_must_be_allowlisted(url):
+    r = {"r1": rule(citations=[cit(url=url, quote="not in any act")])}
+    problems = _corpus_problems(r)
+    assert len(problems) == 1 and url in problems[0]
+    assert _corpus_problems(r, outside=frozenset({url})) == []
+
+
+def test_catalogue_cites_no_document_outside_the_corpus():
+    assert OUTSIDE_CORPUS_URLS == frozenset()
 
 
 def test_strict_rejects_todo_quote(tmp_path):

@@ -1,14 +1,10 @@
 """The matcher's answer schema, clause candidates, prompt and answer parser, without a model."""
 import json
-from pathlib import Path
 
 from pipeline import clients
 from rag import corpus, matcher
 from rag.corpus import Clause
 from rag.retrieve import Hit
-from rules import load_rules
-
-ROOT = Path(__file__).resolve().parent.parent
 
 
 def clause(cid, *parts, short="Правила (НБРК № 1)"):
@@ -66,11 +62,19 @@ def test_clause_candidates_catalogue_first_dedup():
 
 
 def test_clause_candidates_skips_quotes_outside_the_in_force_corpus():
-    rules = load_rules(ROOT / "rules.yaml")
-    r = rules["unauthorized_person_in_cash_area"]
-    c = {"id": r["id"], "citations": [{"quote": x["quote"]} for x in r["citations"]]}
-    out = matcher.clause_candidates([], [c], FakeIndex(corpus.load_clauses()))
-    assert [(x.id, part) for x, part in out] == [("V2000020075:8", None)]  # п. 16 is suspended
+    # НБРК № 14 п. 16 is suspended until 2027-01-01: the corpus has the text but does not load it
+    suspended = "каждая касса имеет отдельный вход с закрывающейся на замок дверью"
+    in_force = "Кассовый узел подлежит изолированию от других производственных, подсобных, подвальных и служебных помещений одним закрывающимся служебным входом."
+    everything = corpus.load_clauses(in_force_only=False)
+    assert [c.id for c in everything if suspended in " ".join(c.parts)] == ["V2000020075:16"]  # the quote is real
+
+    def run(*quotes, clauses):
+        cand = {"id": "x", "citations": [{"quote": q} for q in quotes]}
+        return [(c.id, part) for c, part in matcher.clause_candidates([], [cand], FakeIndex(clauses))]
+
+    assert run(suspended, clauses=everything) == [("V2000020075:16", None)]  # the skip is what removes it
+    assert run(suspended, clauses=corpus.load_clauses()) == []
+    assert run(suspended, in_force, clauses=corpus.load_clauses()) == [("V2000020075:8", None)]
 
 
 # ---- build_prompt -------------------------------------------------------------------------

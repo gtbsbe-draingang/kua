@@ -68,24 +68,6 @@ def test_load_clauses_rejects_duplicates_and_missing_fields(tmp_path):
         corpus.load_clauses(d2)
 
 
-def test_catalogue_quotes_are_in_corpus():
-    # one quote (п. 16 of НБРК №14) sits in a clause the act marks as suspended until 2027
-    everything = corpus.load_clauses(in_force_only=False)
-    in_force = corpus.load_clauses()
-    suspended_only = []
-    rules = load_rules(ROOT / "rules.yaml")
-    n = 0
-    for rid, r in rules.items():
-        for c in r.get("citations") or []:
-            code = c["url"].split("/docs/")[1].split("#")[0]
-            assert corpus.find_quote(everything, c["quote"], code) is not None, (rid, c["quote"][:60])
-            if corpus.find_quote(in_force, c["quote"], code) is None:
-                suspended_only.append(c["quote"])
-            n += 1
-    assert n == 35
-    assert suspended_only == ["каждая касса имеет отдельный вход с закрывающейся на замок дверью"]
-
-
 def test_find_quote_scopes_to_act(clauses):
     q = "В помещениях операционных касс обменных пунктов не допускается присутствие посторонних лиц"
     assert corpus.find_quote(clauses, q).id == "V1900018545:41"
