@@ -244,7 +244,8 @@ def _cell(x, fmt) -> str:
     return "-" if x is None else format(x, fmt)
 
 
-def cmd_sweep(a, keep=None) -> int:
+def cmd_sweep(a, keep=None, rows=None) -> int:
+    """rows: a list that receives the printed operating-point table as dicts (for tools/dashboard_export.py)."""
     keep = keep or _default_keep()
     if keep is None:
         print("sweep needs pipeline.logic.keep_decision (Task 7), which is not available yet", file=sys.stderr)
@@ -362,6 +363,9 @@ def cmd_sweep(a, keep=None) -> int:
         for v in VERIFY_GRID:
             m = points[(v, k, main_cand, None)]
             mark = "  <- chosen" if (v, k, main_cand, None) == best_pt[0] else ""
+            if rows is not None:
+                rows.append({"verify": v, "top_k": k, "found": int(m["found"]), "fp_clips": int(m["fp"]),
+                             "verdict_acc": float(m["acc"]), "events_per_flagged": m["epf"]})
             print(f"{k:>5} {v:>6.2f}" + ("" if cells else f" {main_cand:>5.2f} {'off':>6}")
                   + f" {metrics(m)}{mark}")
     if not cells:
