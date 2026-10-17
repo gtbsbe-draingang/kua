@@ -75,3 +75,16 @@ case ":$PATH:" in
   *":$MTA_ROOT/env/tools/bin:"*) ;;
   *) export PATH="$MTA_ROOT/env/tools/bin:$PATH" ;;
 esac
+
+# Compilers (setup.sh toolchain): gcc/g++ 13 and nvcc 12.8 from conda-forge. The
+# pod has none of its own; Triton builds its kernel launchers with $CC. The bin
+# dir goes at the END of PATH, so it never shadows an env's python or a system tool.
+if [ -x "$MTA_ROOT/env/toolchain/bin/gcc" ]; then
+  export CC="$MTA_ROOT/env/toolchain/bin/gcc"
+  export CXX="$MTA_ROOT/env/toolchain/bin/g++"
+  export CUDA_HOME="$MTA_ROOT/env/toolchain"
+  case ":$PATH:" in
+    *":$MTA_ROOT/env/toolchain/bin:"*) ;;
+    *) export PATH="$PATH:$MTA_ROOT/env/toolchain/bin" ;;
+  esac
+fi

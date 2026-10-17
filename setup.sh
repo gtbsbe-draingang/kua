@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the pod's Python environments and fetch the model weights.
 #
-#   bash setup.sh main iv3 vlm      # any subset of: tools main iv3 vlm weights
+#   bash setup.sh main iv3 vlm      # any subset of: tools toolchain main iv3 vlm weights
 #
 # Every target is idempotent: rerunning it only installs what is missing.
 # Nothing is ever compiled. Every install runs with --no-build (and env.sh sets
@@ -9,11 +9,13 @@
 # of starting a source build.
 # flash-attn and causal-conv1d come from their GitHub release wheels.
 #
-#   tools    env/tools: uv and the hf CLI, in a venv made by python3 -m venv + pip
-#   main     env/main: API + VideoJev-4B (torch 2.8.0+cu128, transformers 5.14.1)
-#   iv3      env/iv3: InternVideo3-8B server (torch 2.8.0+cu128, transformers 4.57.3)
-#   vlm      env/vlm: SGLang for the Qwen3.5-9B judge (CUDA 12 build, see below)
-#   weights  hf download of the three models into HF_HOME, then a shard check
+#   tools      env/tools: uv and the hf CLI, in a venv made by python3 -m venv + pip
+#   toolchain  env/toolchain: prebuilt gcc/g++ 13 and nvcc 12.8 from conda-forge
+#              (micromamba), for Triton's JIT; env.sh exports CC, CXX, CUDA_HOME
+#   main       env/main: API + VideoJev-4B (torch 2.8.0+cu128, transformers 5.14.1)
+#   iv3        env/iv3: InternVideo3-8B server (torch 2.8.0+cu128, transformers 4.57.3)
+#   vlm        env/vlm: SGLang for the Qwen3.5-9B judge (CUDA 12 build, see below)
+#   weights    hf download of the three models into HF_HOME, then a shard check
 #
 # vlm's architecture check needs the weights; it is deferred (logged) until they
 # exist, and the weights target runs it once env/vlm exists.
@@ -84,6 +86,22 @@ VLM_EXTRAS=(
   "flashinfer-jit-cache @ $FI_REL/flashinfer_jit_cache-0.6.18+cu129-cp39-abi3-manylinux_2_28_x86_64.whl"
 )
 
+# The pod has no C compiler and no CUDA toolkit. Triton builds a small C launcher
+# per kernel signature at first launch (VideoJev's flash-linear-attention kernels
+# need it), so env/toolchain holds prebuilt compilers from conda-forge, installed
+# by a static micromamba binary. cuda-version=12.8 matches the driver (570).
+# All micromamba state (package cache, repodata, rc lookups, environments.txt)
+# stays under cache/mamba: it runs with --no-rc, its root prefix and package dirs
+# there, and HOME pointed there too, so nothing can land in the real home.
+MICROMAMBA_VERSION=2.9.0-0
+MICROMAMBA_SHA256=366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3
+MICROMAMBA_URL=https://github.com/mamba-org/micromamba-releases/releases/download/$MICROMAMBA_VERSION/micromamba-linux-64
+TOOLCHAIN_SPECS=(
+  "gcc=13" "gxx=13"
+  "cuda-version=12.8"
+  "cuda-nvcc=12.8.93" "cuda-cudart-dev=12.8.90" "cuda-cccl=12.8.90"
+)
+
 # Models: repo id, then hf download --exclude patterns (junk the author uploaded).
 MODELS=(
   "ZhuYuhan/VideoJev-4B"
@@ -135,6 +153,77 @@ build_tools() {
   fi
   "$UV" python install "$PY" --no-bin
   log "tools: $("$UV" --version), hf $("$TOOLS/bin/python" -c 'import huggingface_hub as h; print(h.__version__)'), python $("$UV" python find "$PY")"
+}
+
+# micromamba with all of its state under cache/mamba (see MICROMAMBA_* above).
+# Usage: mamba_run <subcommand> [args...]
+mamba_run() {
+  local sub=$1 root=$MTA_ROOT/cache/mamba
+  shift
+  mkdir -p "$root/home" "$root/pkgs"
+  HOME=$root/home MAMBA_ROOT_PREFIX=$root CONDA_PKGS_DIRS=$root/pkgs MAMBA_PKGS_DIRS=$root/pkgs \
+    MAMBA_REGISTER_ENVS=false CONDA_REGISTER_ENVS=false \
+    "$ENVS/toolchain-bin/micromamba" "$sub" --no-rc -r "$root" "$@"
+}
+
+build_toolchain() {
+  local bin=$ENVS/toolchain-bin/micromamba prefix=$ENVS/toolchain
+  if [ ! -x "$bin" ] || [ "$(sha256sum "$bin" | cut -d' ' -f1)" != "$MICROMAMBA_SHA256" ]; then
+    log "download micromamba $MICROMAMBA_VERSION"
+    mkdir -p "$(dirname "$bin")"
+    curl -fsSL --retry 3 -o "$bin.part" "$MICROMAMBA_URL"
+    echo "$MICROMAMBA_SHA256  $bin.part" | sha256sum -c --quiet || die "micromamba checksum mismatch"
+    chmod +x "$bin.part"
+    mv -f "$bin.part" "$bin"
+  fi
+  log "micromamba $("$bin" --version)"
+  local verb=install
+  [ -f "$prefix/conda-meta/history" ] || verb=create
+  log "micromamba $verb $prefix: ${TOOLCHAIN_SPECS[*]}"
+  mamba_run "$verb" -y -p "$prefix" --override-channels -c conda-forge --strict-channel-priority \
+    "${TOOLCHAIN_SPECS[@]}"
+  mamba_run list -p "$prefix" > "$MTA_ROOT/logs/freeze-toolchain.txt"
+  log "package list: logs/freeze-toolchain.txt"
+  check_toolchain
+}
+
+# The compilers run, and build what Triton builds: a shared C module that includes
+# Python.h (env/main's interpreter) and links libcuda, then Triton's own launcher
+# utilities (driver.c). nvcc compiles an sm_90 kernel object. Nothing here runs
+# on the GPU: the Triton check imports with the GPU hidden and only loads libcuda.
+check_toolchain() {
+  local tc=$ENVS/toolchain dir=$MTA_ROOT/cache/setup/toolchain-check inc libcuda
+  log "check toolchain"
+  [ -x "$tc/bin/gcc" ] && [ -x "$tc/bin/g++" ] && [ -x "$tc/bin/nvcc" ] || die "toolchain incomplete: no gcc, g++ or nvcc in $tc/bin"
+  "$tc/bin/gcc" --version | head -n 1
+  "$tc/bin/g++" --version | head -n 1
+  "$tc/bin/nvcc" --version | tail -n 2
+  [ "$("$tc/bin/gcc" -dumpversion | cut -d. -f1)" = 13 ] || die "gcc is not 13"
+  "$tc/bin/nvcc" --version | grep -q 'release 12\.8' || die "nvcc is not 12.8"
+  mkdir -p "$dir"
+  printf '__global__ void k(float *x) { x[threadIdx.x] *= 2.f; }\n' > "$dir/k.cu"
+  "$tc/bin/nvcc" -ccbin "$tc/bin/g++" -arch=sm_90 -c "$dir/k.cu" -o "$dir/k.o"
+  log "nvcc built an sm_90 object: $(stat -c %s "$dir/k.o") bytes"
+  if [ ! -x "$ENVS/main/bin/python" ]; then
+    log "Python.h and Triton checks deferred: env/main not built (rerun: setup.sh toolchain)"
+    return 0
+  fi
+  inc=$(CUDA_VISIBLE_DEVICES='' "$ENVS/main/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+  libcuda=$(ldconfig -p | awk '/libcuda\.so\.1 / {print $NF; exit}')
+  [ -n "$libcuda" ] || die "libcuda.so.1 not found by ldconfig"
+  libcuda=$(dirname "$libcuda")
+  cat > "$dir/tc_check.c" <<'C'
+#include <Python.h>
+static struct PyModuleDef def = {PyModuleDef_HEAD_INIT, "tc_check", NULL, -1, NULL};
+PyMODINIT_FUNC PyInit_tc_check(void) { return PyModule_Create(&def); }
+C
+  "$tc/bin/gcc" "$dir/tc_check.c" -O3 -shared -fPIC -Wno-psabi -I"$inc" -L"$libcuda" -lcuda -o "$dir/tc_check.so"
+  CUDA_VISIBLE_DEVICES='' "$ENVS/main/bin/python" -c "import sys; sys.path.insert(0, '$dir'); import tc_check; print('Python.h module built and imported:', tc_check.__file__)"
+  CUDA_VISIBLE_DEVICES='' CC="$tc/bin/gcc" "$ENVS/main/bin/python" -c '
+import triton
+from triton.backends.nvidia.driver import CudaUtils
+CudaUtils()
+print("triton", triton.__version__, "built and loaded its CUDA launcher utilities")'
 }
 
 build_main() {
@@ -325,7 +414,7 @@ usage() { sed -n '2,/^set -euo pipefail/{/^#/s/^# \{0,1\}//p;}' "$0"; }
 [ $# -gt 0 ] || { usage; exit 2; }
 case $1 in -h|--help) usage; exit 0 ;; esac
 for target in "$@"; do
-  case $target in tools|main|iv3|vlm|weights) ;; *) die "unknown target: $target" ;; esac
+  case $target in tools|toolchain|main|iv3|vlm|weights) ;; *) die "unknown target: $target" ;; esac
 done
 mkdir -p "$MTA_ROOT/logs"
 build_tools
