@@ -37,6 +37,10 @@ export UV_PYTHON_BIN_DIR="$MTA_ROOT/env/python/bin"
 export UV_TOOL_DIR="$MTA_ROOT/env/uv-tools"
 export UV_TOOL_BIN_DIR="$MTA_ROOT/env/uv-tools/bin"
 export UV_PYTHON_PREFERENCE=only-managed
+# Never build a package from source, in setup.sh or in any manual install:
+# a package without a prebuilt wheel fails instead of compiling.
+export UV_NO_BUILD=1
+export PIP_ONLY_BINARY=:all:
 
 # GPU kernel and JIT caches (CUDA defaults to ~/.nv, Triton to ~/.triton).
 export CUDA_CACHE_PATH="$MTA_ROOT/cache/nv"

@@ -4,8 +4,9 @@
 #   bash setup.sh main iv3 vlm      # any subset of: tools main iv3 vlm weights
 #
 # Every target is idempotent: rerunning it only installs what is missing.
-# Nothing is ever compiled. Every install runs with --no-build, so a package
-# without a prebuilt wheel fails the build instead of starting a source build.
+# Nothing is ever compiled. Every install runs with --no-build (and env.sh sets
+# UV_NO_BUILD=1), so a package without a prebuilt wheel fails the build instead
+# of starting a source build.
 # flash-attn and causal-conv1d come from their GitHub release wheels.
 #
 #   tools    env/tools: uv and the hf CLI, in a venv made by python3 -m venv + pip
@@ -13,6 +14,9 @@
 #   iv3      env/iv3: InternVideo3-8B server (torch 2.8.0+cu128, transformers 4.57.3)
 #   vlm      env/vlm: SGLang for the Qwen3.5-9B judge (CUDA 12 build, see below)
 #   weights  hf download of the three models into HF_HOME, then a shard check
+#
+# vlm's architecture check needs the weights; it is deferred (logged) until they
+# exist, and the weights target runs it once env/vlm exists.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -206,7 +210,6 @@ build_vlm() {
     die "CUDA 13 packages in env/vlm (listed above)"
   fi
   check vlm '
-import glob, json, os
 import torch, torchvision, sglang, sgl_kernel, transformers, xgrammar, flashinfer
 from sglang.srt.models.qwen3_5 import EntryClass
 from importlib.metadata import version as v
@@ -214,13 +217,38 @@ print("torch", torch.__version__, "cuda", torch.version.cuda, "| torchvision", t
 print("sglang", v("sglang"), "| sglang-kernel", v("sglang-kernel"), "| transformers", transformers.__version__, "| xgrammar", v("xgrammar"))
 print("flashinfer-python", v("flashinfer-python"), "| flashinfer-cubin", v("flashinfer-cubin"), "| flashinfer-jit-cache", v("flashinfer-jit-cache"))
 print("sgl-deep-gemm", v("sgl-deep-gemm"), "| sgl-deep-ep", v("sgl-deep-ep"), "| cuda-python", v("cuda-python"), "| cuda-tile", v("cuda-tile"))
-cfg = glob.glob(os.environ["HF_HOME"] + "/hub/models--Qwen--Qwen3.5-9B/snapshots/*/config.json")[0]
-archs = json.load(open(cfg))["architectures"]
-names = [c.__name__ for c in EntryClass]
-print("Qwen3.5-9B architectures", archs, "| sglang.srt.models.qwen3_5 entry classes", names)
-assert set(archs) <= set(names), "sglang has no model class for this checkpoint"
 '
   "$ENVS/vlm/bin/python" -c 'from cuda.bindings import driver as d; e, ver = d.cuDriverGetVersion(); print("cuda-bindings sees driver API", ver)'
+  check_vlm_arch
+}
+
+# The Qwen3.5-9B checkpoint's architectures must have a model class in SGLang.
+# It needs both env/vlm and the weights, and setup runs vlm before weights on a
+# fresh pod, so both targets call it and it is skipped until both exist.
+check_vlm_arch() {
+  local base=$HF_HOME/hub/models--Qwen--Qwen3.5-9B ref
+  if [ ! -x "$ENVS/vlm/bin/python" ]; then
+    log "architecture check deferred: env/vlm not built"
+    return 0
+  fi
+  if [ ! -f "$base/refs/main" ]; then
+    log "architecture check deferred: weights not downloaded"
+    return 0
+  fi
+  ref=$(cat "$base/refs/main")
+  if [ ! -f "$base/snapshots/$ref/config.json" ]; then
+    log "architecture check deferred: weights not downloaded"
+    return 0
+  fi
+  log "check vlm architecture"
+  CUDA_VISIBLE_DEVICES='' "$ENVS/vlm/bin/python" - "$base/snapshots/$ref/config.json" <<'PY'
+import json, sys
+from sglang.srt.models.qwen3_5 import EntryClass
+archs = json.load(open(sys.argv[1]))["architectures"]
+names = [c.__name__ for c in EntryClass]
+print("Qwen3.5-9B architectures", archs, "| sglang.srt.models.qwen3_5 entry classes", names)
+sys.exit(0 if set(archs) <= set(names) else "sglang has no model class for this checkpoint")
+PY
 }
 
 # Download the three models into HF_HOME (resumable), then check every shard
@@ -236,6 +264,7 @@ build_weights() {
   done
   verify_weights
   backup_iv3
+  check_vlm_arch
 }
 
 verify_weights() {
@@ -292,7 +321,9 @@ backup_iv3() {
   fi
 }
 
-[ $# -gt 0 ] || { sed -n '2,16p' "$0"; exit 2; }
+usage() { sed -n '2,/^set -euo pipefail/{/^#/s/^# \{0,1\}//p;}' "$0"; }
+[ $# -gt 0 ] || { usage; exit 2; }
+case $1 in -h|--help) usage; exit 0 ;; esac
 for target in "$@"; do
   case $target in tools|main|iv3|vlm|weights) ;; *) die "unknown target: $target" ;; esac
 done

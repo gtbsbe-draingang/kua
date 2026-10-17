@@ -6,9 +6,12 @@
 #                                       folder to model_train_amir/data/clips/
 #   tools/push.sh --clips-dir DIR       the same as --clips, with another folder
 #
-# The tarball is extracted over svc/, so files that exist only on the pod are
-# kept. The root's env.sh is (re)linked to svc/env.sh. Clips keep their file
-# names, and a clip whose md5 on the pod already matches is skipped.
+# It ships the working tree of the tracked files: uncommitted edits to tracked
+# files go along, untracked files never do. It never deletes anything on the
+# pod: the tarball is extracted over svc/, so files that exist only on the pod
+# (including files since removed from git) stay until removed by hand. The
+# root's env.sh is (re)linked to svc/env.sh. Clips keep their file names, and a
+# clip whose md5 on the pod already matches is skipped.
 #
 # The clips folder defaults to <repo root>/../open/videos. The pod helpers
 # (jx.py, jup_upload.py) are found in $POD_HELPERS_DIR, which defaults to
@@ -16,7 +19,7 @@
 # token themselves.
 set -euo pipefail
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^set -euo pipefail/{/^#/s/^# \{0,1\}//p;}' "$0"; }
 
 REPO=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 HELPERS=${POD_HELPERS_DIR:-$HOME/Coding/armeta/ge-2052-rpn-classifier/tools}
@@ -53,10 +56,12 @@ DONE = "__push_step_done__"
 
 
 def remote(script, timeout=300):
-    """Run a bash script on the pod and return its output; fail unless it ran to the end."""
+    """Run a bash script on the pod and return its output; fail unless it ran to the end.
+    The root's env.sh is sourced first when it exists, so temp files stay inside the root."""
+    prelude = f"set -euo pipefail\nif [ -f {POD}/env.sh ]; then . {POD}/env.sh; fi\n"
     p = subprocess.run(
         [sys.executable, str(helpers / "jx.py"), "-s", "-t", str(timeout)],
-        input=f"set -euo pipefail\n{script}\necho {DONE}\n", capture_output=True, text=True)
+        input=f"{prelude}{script}\necho {DONE}\n", capture_output=True, text=True)
     lines = p.stdout.splitlines()
     if p.returncode != 0 or DONE not in lines:
         sys.stderr.write(p.stdout + p.stderr)
