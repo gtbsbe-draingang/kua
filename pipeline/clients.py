@@ -1,5 +1,6 @@
 """HTTP clients for the InternVideo3 check server and the optional rule judge. Neither ever raises:
-any error, timeout, non-200 reply or malformed answer gives None / empty values."""
+any error, timeout, non-200 reply or malformed answer gives None / empty values. judge_fields, the
+RAG server's reader of the judge request, is the one function here that raises (ValueError)."""
 from __future__ import annotations
 
 import base64
@@ -161,10 +162,18 @@ def _judge_endpoint() -> str:
     return base if base.endswith("/chat/completions") else base + "/v1/chat/completions"
 
 
+# The judge request's text: OBSERVATION_LABEL + observation (NO_OBSERVATION when empty) + CANDIDATES_LABEL + the
+# candidates as indented JSON + "\n\n<n> frame(s) from the moment follow." judge_fields reads it back.
+OBSERVATION_LABEL = "Observation from a video model (may be empty): "
+NO_OBSERVATION = "(none)"
+CANDIDATES_LABEL = "\n\nCandidate rules (JSON):\n"
+FRAMES_RE = re.compile(r"\n\n\d+ frame\(s\) from the moment follow\.")
+
+
 def judge_request(observation: str, evidence: list[Frame], candidates: list[dict]) -> dict:
     ids = [str(c["id"]) for c in candidates]
-    text = (f"Observation from a video model (may be empty): {observation.strip() or '(none)'}\n\n"
-            f"Candidate rules (JSON):\n{json.dumps(candidates, ensure_ascii=False, indent=1)}\n\n"
+    text = (f"{OBSERVATION_LABEL}{observation.strip() or NO_OBSERVATION}"
+            f"{CANDIDATES_LABEL}{json.dumps(candidates, ensure_ascii=False, indent=1)}\n\n"
             f"{len(evidence)} frame(s) from the moment follow.")
     content = [{"type": "text", "text": text}] + [
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(f.jpeg).decode()}}
@@ -183,31 +192,85 @@ def judge_request(observation: str, evidence: list[Frame], candidates: list[dict
             "chat_template_kwargs": {"enable_thinking": False}}
 
 
+def judge_fields(body: dict) -> tuple[str, list[dict]]:
+    """(observation, candidates) back from a judge_request body; the frames are not read. The observation is the
+    one judge_request wrote: stripped, and "" for its "(none)". ValueError when the body is not laid out that way.
+
+    The observation may hold anything, the candidate label included: the label that counts is the last one, because
+    the indented JSON after it never holds a blank line (json.dumps escapes newlines inside strings)."""
+    messages = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(messages, list):
+        raise ValueError("no messages")
+    user = next((m for m in messages if isinstance(m, dict) and m.get("role") == "user"), None)
+    if user is None:
+        raise ValueError("no user message")
+    content = user.get("content")
+    if isinstance(content, str):
+        text = content
+    else:
+        parts = content if isinstance(content, list) else []
+        text = next((p.get("text") for p in parts if isinstance(p, dict) and p.get("type") == "text"), None)
+    if not isinstance(text, str) or not text.startswith(OBSERVATION_LABEL):
+        raise ValueError("the user text does not start with the observation")
+    at = text.rfind(CANDIDATES_LABEL)
+    if at < len(OBSERVATION_LABEL):
+        raise ValueError("no candidate rules in the user text")
+    candidates, end = json.JSONDecoder().raw_decode(text, at + len(CANDIDATES_LABEL))
+    if not FRAMES_RE.fullmatch(text, end):
+        raise ValueError("unexpected text after the candidate rules")
+    if not isinstance(candidates, list) or not all(isinstance(c, dict) for c in candidates):
+        raise ValueError("the candidate rules are not a list of objects")
+    observation = text[len(OBSERVATION_LABEL):at]
+    return ("" if observation == NO_OBSERVATION else observation), candidates
+
+
 def _json_object(text: str):
     text = text.strip()
     m = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.S)
     return json.loads(m.group(1) if m else text)
 
 
-def judge(observation: str, evidence: list[Frame], candidates: list[dict],
-          timeout: float) -> tuple[str | None, str, float | None]:
-    """Ask the judge which candidate rule fits: (rule_id as answered, Russian justification, confidence).
-    The caller checks rule_id against the candidates. (None, "", None) when JUDGE_URL is empty or on failure."""
+CITATION_FIELDS = ("document", "clause", "quote", "url")
+
+
+def _citation(x) -> dict | None:
+    if not isinstance(x, dict) or not all(isinstance(x.get(k), str) for k in CITATION_FIELDS):
+        return None
+    return {k: x[k] for k in CITATION_FIELDS}
+
+
+def judge_answer(observation: str, evidence: list[Frame], candidates: list[dict], timeout: float) -> dict | None:
+    """Ask the judge which candidate rule fits, with the request judge sends. Returns rule_id as answered (stripped),
+    justification (whitespace collapsed, "" when missing), confidence, and what the RAG server adds: clause_id,
+    violation and citation ({document, clause, quote, url}). Those four are None when absent or invalid. The caller
+    checks rule_id against the candidates. None when JUDGE_URL is empty or on failure."""
     try:
         if not judge_enabled() or not candidates or not timeout or timeout <= 0:
-            return None, "", None
+            return None
         r = _post(_judge_endpoint(), judge_request(observation or "", evidence, candidates), timeout)
         if r.status_code != 200:
             log.warning("judge: HTTP %s", r.status_code)
-            return None, "", None
+            return None
         d = _json_object(r.json()["choices"][0]["message"]["content"])
         rid = d.get("rule_id") if isinstance(d, dict) else None
         if not isinstance(rid, str):
             log.warning("judge: answer without a rule_id")
-            return None, "", None
+            return None
         just = d.get("justification")
-        just = " ".join(just.split()) if isinstance(just, str) else ""
-        return rid.strip(), just, _prob(d.get("confidence"))
+        clause = d.get("clause_id")
+        clause = clause.strip() if isinstance(clause, str) else ""
+        return {"rule_id": rid.strip(), "justification": " ".join(just.split()) if isinstance(just, str) else "",
+                "confidence": _prob(d.get("confidence")),
+                "clause_id": clause if clause and clause.lower() != "none" else None,
+                "violation": _prob(d.get("violation")), "citation": _citation(d.get("citation"))}
     except Exception as e:
         log.warning("judge failed: %s", type(e).__name__)
-        return None, "", None
+        return None
+
+
+def judge(observation: str, evidence: list[Frame], candidates: list[dict],
+          timeout: float) -> tuple[str | None, str, float | None]:
+    """Ask the judge which candidate rule fits: (rule_id as answered, Russian justification, confidence).
+    The caller checks rule_id against the candidates. (None, "", None) when JUDGE_URL is empty or on failure."""
+    a = judge_answer(observation, evidence, candidates, timeout)
+    return (None, "", None) if a is None else (a["rule_id"], a["justification"], a["confidence"])

@@ -13,6 +13,11 @@ POST /verify {..., "n_answers": n} with 1 <= n <= 20, for a prompt of n numbered
      "observation": str, "raw": str, ...} plus frames, native_size, decoded_size,
      grid_thw, prompt_tokens, timings. No answer line at all -> HTTP 500
      {"error": "no answers"}.
+POST /generate {"prompt": str (1-20000 chars), "system": str = "", "max_new_tokens": 1-512 (384)}
+     -> {"text": str, "seconds": float}. Text only: the chat template with the
+     system turn (when given), the user turn and the generation prompt, then
+     greedy decoding with no logits processor. It takes a request slot and the
+     model lock like /verify. Any error -> HTTP 500 {"error": "..."}.
 
 How a request is answered:
 - Frames: PyAV decodes the file and keeps, for each time k/fps (k = 0, 1, ...)
@@ -84,7 +89,7 @@ import torch  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 from transformers import LogitsProcessor, LogitsProcessorList  # noqa: E402
 
 REPO = os.environ.get("IV3_REPO", "yanziang/InternVideo3-8B-Instruct")
@@ -99,6 +104,7 @@ YES = ("YES", " YES", "Yes", " Yes", "yes", " yes")
 NO = ("NO", " NO", "No", " No", "no", " no")
 YES_NO = frozenset(YES + NO)
 MAX_ANSWERS = 20
+MAX_PROMPT = 20000  # characters of a /generate prompt
 
 torch.set_num_threads(4)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -289,6 +295,18 @@ def build_inputs(frames: np.ndarray, info: dict, prompt: str, prefill: str = PRE
     return inputs, grid
 
 
+def build_text_inputs(prompt: str, system: str = ""):
+    """Inputs for a text-only request: the chat template with the system turn (when given), the user turn and the
+    generation prompt. No video, no prefill."""
+    if "<|" in prompt or "<|" in system:
+        raise ValueError("the prompt must not contain special tokens")
+    processor = STATE["processor"]
+    messages = [{"role": "system", "content": [{"type": "text", "text": system}]}] if system else []
+    messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return processor(text=[text], return_tensors="pt")
+
+
 ANSWER_RE = re.compile(r"(?<![A-Za-z])ANSWER\s*\**\s*[:：=]\s*\**\s*(YES|NO)\b", re.I)
 TYPE_RE = re.compile(r"(?<![A-Za-z])TYPE\s*\**\s*[:：=]\s*\**\s*[`'\"«<\[(]*\s*([A-Za-z][\w\-]*)", re.I)
 OBS_RE = re.compile(r"(?<![A-Za-z])OBSERVATION\s*\**\s*[:：=]\s*(.*)", re.I | re.S)
@@ -368,8 +386,9 @@ class AllStepsYesNo(LogitsProcessor):
         return torch.stack(self.steps).cpu().tolist() if self.steps else []
 
 
-def generate(inputs, max_new_tokens: int, capture: LogitsProcessor) -> tuple[torch.Tensor, int]:
-    """Greedy decoding with capture as the only logits processor: (new token ids on the CPU, prompt tokens)."""
+def generate(inputs, max_new_tokens: int, capture: LogitsProcessor | None = None) -> tuple[torch.Tensor, int]:
+    """Greedy decoding with capture as the only logits processor (none without it): (new token ids on the CPU,
+    prompt tokens)."""
     model = STATE["model"]
     inputs = inputs.to(model.device)
     prompt_tokens = int(inputs["input_ids"].shape[1])
@@ -378,7 +397,7 @@ def generate(inputs, max_new_tokens: int, capture: LogitsProcessor) -> tuple[tor
             out = model.generate(
                 **inputs, max_new_tokens=max_new_tokens, do_sample=False,
                 temperature=None, top_p=None, top_k=None,
-                logits_processor=LogitsProcessorList([capture]),
+                logits_processor=LogitsProcessorList([capture] if capture is not None else []),
             )
         new_ids = out[0, prompt_tokens:].cpu()
         del out
@@ -423,6 +442,13 @@ def run_model_multi(inputs, n: int) -> dict:
                 prompt_tokens=prompt_tokens, new_tokens=int(new_ids.numel()))
 
 
+def run_text(inputs, max_new_tokens: int) -> dict:
+    """The generated text of a text-only request (build_text_inputs), greedy and with no logits processor."""
+    new_ids, prompt_tokens = generate(inputs, max_new_tokens)
+    return dict(text=STATE["tok"].decode(new_ids, skip_special_tokens=True), prompt_tokens=prompt_tokens,
+                new_tokens=int(new_ids.numel()))
+
+
 def warmup() -> None:
     """One tiny synthetic request through the whole path (frames, processor, generate)."""
     t0 = time.perf_counter()
@@ -451,6 +477,12 @@ class VerifyRequest(BaseModel):
     prompt: str
     fps: float = 4.0
     n_answers: int | None = None  # set: the prompt asks this many numbered YES/NO questions
+
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=MAX_PROMPT)
+    system: str = ""
+    max_new_tokens: int = Field(384, ge=1, le=512)
 
 
 def error(message: str) -> JSONResponse:
@@ -539,3 +571,37 @@ def verify(req: VerifyRequest):
         "grid_thw": grid, "prompt_tokens": out["prompt_tokens"],
         "timings": {k: round(v, 3) for k, v in timings.items()},
     }
+
+
+@app.post("/generate")
+def generate_text(req: GenerateRequest):
+    t0 = time.perf_counter()
+    try:
+        if not req.prompt.strip():
+            raise ValueError("empty prompt")
+        deadline = t0 + LOCK_TIMEOUT
+        if not SLOTS.acquire(timeout=LOCK_TIMEOUT):
+            raise TimeoutError(f"no free slot for {LOCK_TIMEOUT:.0f} s (other requests in progress)")
+        try:
+            t1 = time.perf_counter()
+            inputs = build_text_inputs(req.prompt, req.system)
+            t2 = time.perf_counter()
+            if not LOCK.acquire(timeout=max(0.0, deadline - t2)):
+                raise TimeoutError(f"the model stayed busy for {LOCK_TIMEOUT:.0f} s")
+            try:
+                t3 = time.perf_counter()
+                out = run_text(inputs, req.max_new_tokens)
+            finally:
+                LOCK.release()
+            del inputs
+            t4 = time.perf_counter()
+        finally:
+            SLOTS.release()
+    except Exception as exc:  # noqa: BLE001 - every failure becomes a JSON 500
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            torch.cuda.empty_cache()
+        log.exception("generate failed")
+        return error(f"{type(exc).__name__}: {exc}")
+    log.info("generate | %d prompt + %d new tokens | slot_wait %.2fs preprocess %.2fs wait %.2fs model %.2fs "
+             "total %.2fs", out["prompt_tokens"], out["new_tokens"], t1 - t0, t2 - t1, t3 - t2, t4 - t3, t4 - t0)
+    return {"text": out["text"], "seconds": round(t4 - t0, 3)}
