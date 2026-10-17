@@ -1,0 +1,8 @@
+# macOS
+.DS_Store
+
+# Project rule: docs/ stays on disk and is never committed
+docs/
+
+# graphify output
+graphify-out/

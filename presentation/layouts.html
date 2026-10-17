@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Layout library · Datathon ’26</title>
+<link rel="stylesheet" href="deck/deck.css">
+<style>
+  :root { --footer-text: "DATATHON ’26 · TEAM [NAME]"; }
+</style>
+<script defer src="deck/deck.js"></script>
+</head>
+<!-- Spare layouts, one per slide. Copy a <section> into index.html when you need it.
+     Each one copies a slide from "How to Win the Datathon.pdf"; the notes (press N) name the page. -->
+<body>
+<main class="deck">
+
+  <!-- ============ L01 · SECTION OPENER ============ -->
+  <section class="slide hero" data-title="Section opener">
+    <span class="pagenum">01</span>
+    <p class="eyebrow">Part 1</p>
+    <h2 class="title-xl">[Section title,]<br><em>[two lines.]</em></h2>
+    <p class="lead">[One sentence on what this part shows.]</p>
+    <aside class="notes"><p>Section opener, PDF p.9. No footer or squares. The dim number top right is the section number.</p></aside>
+  </section>
+
+  <!-- ============ L02 · OPENER WITH CHIPS ============ -->
+  <section class="slide hero" data-title="Opener with chips">
+    <span class="pagenum">02</span>
+    <p class="eyebrow">Part 2</p>
+    <h2 class="title-xl">[Go deeper,]<br><em>[not wider.]</em></h2>
+    <ul class="chips">
+      <li class="chip">[Point one]</li>
+      <li class="chip">[Point two]</li>
+      <li class="chip">[A longer point three]</li>
+      <li class="chip on">[Highlighted point]</li>
+      <li class="chip">[Point five]</li>
+    </ul>
+    <aside class="notes"><p>Opener with chips, PDF p.12. Add class "on" to a chip to highlight it.</p></aside>
+  </section>
+
+  <!-- ============ L03 · STATEMENT ============ -->
+  <section class="slide statement" data-title="Statement">
+    <h2 class="title-lg">[One statement]<br>[with] <em>[the key part.]</em></h2>
+    <p class="lead">[One quiet supporting line.]</p>
+    <aside class="notes"><p>Statement, PDF p.7–8. One sentence, accent on the words that matter.</p></aside>
+  </section>
+
+  <!-- ============ L04 · GRADIENT STATEMENT ============ -->
+  <section class="slide grad" data-title="Gradient statement">
+    <p class="eyebrow">[Eyebrow]</p>
+    <h2 class="title-xl">[One dataset.]<br><em>[One problem.]</em></h2>
+    <p class="lead">[Supporting line.]</p>
+    <aside class="notes"><p>Gradient statement, PDF p.6 and p.28. Use once or twice per deck, for the big moment.</p></aside>
+  </section>
+
+  <!-- ============ L05 · GRADIENT + FOUR CARDS ============ -->
+  <section class="slide grad" data-title="Gradient summary">
+    <p class="eyebrow">[Summary]</p>
+    <h2 class="title">[The best model doesn’t win.]</h2>
+    <p class="lead soft" style="margin-top: 20px;">[So what does?]</p>
+    <div class="grid c4">
+      <div class="card"><p class="label accent">01</p><p class="card-title">[Every requirement covered]</p></div>
+      <div class="card"><p class="label accent">02</p><p class="card-title">[Depth, not extra features]</p></div>
+      <div class="card"><p class="label accent">03</p><p class="card-title">[A simple interface]</p></div>
+      <div class="card"><p class="label accent">04</p><p class="card-title">[Slides that show the work]</p></div>
+    </div>
+    <aside class="notes"><p>Gradient summary, PDF p.27. Good as the second-to-last slide: the four things to remember.</p></aside>
+  </section>
+
+  <!-- ============ L06 · COMPARE: TWO CHECKLISTS ============ -->
+  <section class="slide std" data-title="Compare checklists">
+    <p class="eyebrow">[Section] · what it means</p>
+    <h2 class="title">[Complete beats impressive.]</h2>
+    <div class="body">
+      <div class="grid">
+        <div class="card">
+          <p class="label">[Baseline]</p>
+          <ul class="checklist">
+            <li>[Strong point]</li>
+            <li>[Strong point]</li>
+            <li class="todo">[Missing piece]</li>
+            <li class="todo">[Missing piece]</li>
+          </ul>
+          <p class="verdict">[Impressive. Incomplete.]</p>
+        </div>
+        <div class="card hi">
+          <p class="label">[Ours]</p>
+          <ul class="checklist">
+            <li>[Point]</li>
+            <li>[Point]</li>
+            <li>[Point]</li>
+            <li>[Every item in the brief]</li>
+          </ul>
+          <p class="verdict">[Simple. Complete. Wins.]</p>
+        </div>
+      </div>
+    </div>
+    <aside class="notes"><p>Two checklists, PDF p.10. The right card (class "hi") is the one you want them to pick.</p></aside>
+  </section>
+
+  <!-- ============ L07 · COMPARE + CALLOUT ============ -->
+  <section class="slide std" data-title="Compare with callout">
+    <p class="eyebrow">[Section]</p>
+    <h2 class="title">[Different isn’t] <em>[better.]</em></h2>
+    <div class="body">
+      <div class="grid">
+        <div class="card ghost">
+          <p class="label">[What others did]</p>
+          <ul class="stack" style="--gap: 14px; margin-top: 22px;">
+            <li class="card-text">[Point]</li>
+            <li class="card-text">[Point]</li>
+            <li class="card-text">[Point]</li>
+          </ul>
+        </div>
+        <div class="card hi flat">
+          <p class="label">[What we did]</p>
+          <ul class="stack" style="--gap: 14px; margin-top: 22px;">
+            <li class="card-text">[An insight others missed]</li>
+            <li class="card-text">[A number that proves it]</li>
+            <li class="card-text">[A demo that just works]</li>
+          </ul>
+        </div>
+      </div>
+      <p class="callout"><span class="label">[Lesson]</span>[One line of context the jury should keep in mind.]</p>
+    </div>
+    <aside class="notes"><p>Ghost vs highlighted card with a yellow callout, PDF p.22.</p></aside>
+  </section>
+
+  <!-- ============ L08 · THREE OPTIONS ============ -->
+  <section class="slide std" data-title="Three options">
+    <p class="eyebrow">[Question]</p>
+    <h2 class="title">[Three ways to do it.]</h2>
+    <p class="lead">[Which one did we pick, and why?]</p>
+    <div class="body" style="margin-top: 56px;">
+      <div class="grid c3">
+        <div class="card">
+          <span class="tag on-edge">[The trap]</span>
+          <p class="big">A</p>
+          <p class="card-title" style="margin-top: 22px;">[Option A]</p>
+        </div>
+        <div class="card">
+          <p class="big">B</p>
+          <p class="card-title" style="margin-top: 22px;">[Option B]</p>
+        </div>
+        <div class="card hi">
+          <span class="tag on-edge">[Our pick]</span>
+          <p class="big">C</p>
+          <p class="card-title" style="margin-top: 22px;">[Option C]</p>
+        </div>
+      </div>
+    </div>
+    <aside class="notes"><p>Three options, PDF p.11. Move the tags to whichever card needs them.</p></aside>
+  </section>
+
+  <!-- ============ L09 · STEPS WITH ARROWS ============ -->
+  <section class="slide std" data-title="Steps">
+    <p class="eyebrow">[Section] · 01</p>
+    <h2 class="title">[What we did.] <em>[Step by step.]</em></h2>
+    <div class="body">
+      <ul class="steps">
+        <li class="hi"><p class="what"><b>[Step one]</b><span>[What exactly]</span></p><p class="why">[Why it mattered.]</p></li>
+        <li><p class="what"><b>[Step two]</b><span>[What exactly]</span></p><p class="why">[Why it mattered.]</p></li>
+        <li><p class="what"><b>[Step three] <span class="tag warn">[If allowed]</span></b><span>[What exactly]</span></p><p class="why">[Why it mattered.]</p></li>
+        <li class="ghost"><p class="what"><b>[Optional step] <span class="tag outline">[If needed]</span></b><span>[What exactly]</span></p><p class="why">[Why it mattered.]</p></li>
+      </ul>
+    </div>
+    <aside class="notes"><p>Steps with arrows, PDF p.19. Four rows fit; use the ghost row for something optional.</p></aside>
+  </section>
+
+  <!-- ============ L10 · ON STAGE / NOT ON STAGE ============ -->
+  <section class="slide std" data-title="Flow">
+    <p class="eyebrow">[Pipeline]</p>
+    <h2 class="title">[Show what works.]</h2>
+    <div class="body">
+      <p class="label accent">[On stage]</p>
+      <ol class="flow">
+        <li>[Data in]</li>
+        <li>[Model runs]</li>
+        <li>[Result + why]</li>
+      </ol>
+      <p class="label">[Exists, but not on stage]</p>
+      <ol class="flow ghost">
+        <li>[Edge cases]</li>
+        <li>[Slow parts]</li>
+        <li>[Half-done features]</li>
+      </ol>
+      <p class="kicker sm"><span class="soft">[Muted half of the sentence.]</span> [Bright half.]</p>
+    </div>
+    <aside class="notes"><p>Flow, PDF p.24. Works with 2 to 5 boxes.</p></aside>
+  </section>
+
+  <!-- ============ L11 · TWO VERTICAL FLOWS ============ -->
+  <section class="slide std" data-title="Two processes">
+    <p class="eyebrow">[Section] · 03</p>
+    <h2 class="title">[Pick a path.] <em>[Adapt on the way.]</em></h2>
+    <div class="body">
+      <div class="grid">
+        <div class="card ghost tight">
+          <p class="label">[The usual way]</p>
+          <ol class="vflow" style="margin-top: 22px;">
+            <li>[Step]</li>
+            <li>[Step]</li>
+            <li>[Step]</li>
+          </ol>
+        </div>
+        <div class="card hi flat tight">
+          <p class="label">[How we did it]</p>
+          <ol class="vflow" style="margin-top: 22px;">
+            <li>[Step]</li>
+            <li>[Step]</li>
+            <li>[Step]</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+    <aside class="notes"><p>Two vertical processes, PDF p.21.</p></aside>
+  </section>
+
+  <!-- ============ L12 · NUMBERED ROWS ============ -->
+  <section class="slide std" data-title="Numbered rows">
+    <p class="eyebrow">[Quick ones]</p>
+    <h2 class="title">[Four small things]</h2>
+    <div class="body">
+      <ol class="rows">
+        <li>[First point, one line.]</li>
+        <li>[Second point, one line.]</li>
+        <li class="hi">[Third point, highlighted.]</li>
+        <li>[Fourth point, one line.]</li>
+      </ol>
+    </div>
+    <aside class="notes"><p>Numbered rows, PDF p.26. Up to five rows fit. Numbers come from CSS.</p></aside>
+  </section>
+
+  <!-- ============ L13 · FOUR ICON CARDS ============ -->
+  <section class="slide std" data-title="Icon cards">
+    <p class="eyebrow">[Wrap-up]</p>
+    <h2 class="title">[Four things]</h2>
+    <div class="body">
+      <div class="grid c4">
+        <div class="card bevel hi">
+          <p class="label">1</p>
+          <p style="margin-top: 26px; font-size: 40px; color: var(--violet-300);"><i class="ico data"></i></p>
+          <p class="card-text" style="margin-top: 20px; color: var(--ink);">[Short point]</p>
+        </div>
+        <div class="card bevel">
+          <p class="label">2</p>
+          <p style="margin-top: 26px; font-size: 40px; color: var(--violet-300);"><i class="ico target"></i></p>
+          <p class="card-text" style="margin-top: 20px; color: var(--ink);">[Short point]</p>
+        </div>
+        <div class="card bevel">
+          <p class="label">3</p>
+          <p style="margin-top: 26px; font-size: 40px; color: var(--violet-300);"><i class="ico chart"></i></p>
+          <p class="card-text" style="margin-top: 20px; color: var(--ink);">[Short point]</p>
+        </div>
+        <div class="card bevel">
+          <p class="label">4</p>
+          <p style="margin-top: 26px; font-size: 40px; color: var(--violet-300);"><i class="ico zap"></i></p>
+          <p class="card-text" style="margin-top: 20px; color: var(--ink);">[Short point]</p>
+        </div>
+      </div>
+    </div>
+    <aside class="notes"><p>Icon cards, PDF p.29. Icons: check, x, clock, users, search, bulb, zap, data, target, chart, link (class="ico NAME").</p></aside>
+  </section>
+
+  <!-- ============ L14 · BARS ============ -->
+  <section class="slide std" data-title="Bars">
+    <p class="eyebrow">[Comparison]</p>
+    <h2 class="title">[Ours is] <em>[2x faster.]</em></h2>
+    <div class="body">
+      <div class="bars">
+        <div class="bar ghost" style="--v: 100"><span>[Reference]</span><span class="bar-fill">[5 MIN]</span></div>
+        <div class="bar" style="--v: 40"><span>[Option A]</span><span class="bar-fill">[2 MIN]</span></div>
+        <div class="bar hi" style="--v: 30"><span>[Ours]</span><span class="bar-fill">[1.5 MIN]</span></div>
+      </div>
+      <div class="row-between">
+        <p class="kicker">[Takeaway.] <em>[Accent part.]</em></p>
+        <p class="label">[(Small aside.)]</p>
+      </div>
+    </div>
+    <aside class="notes"><p>Bars, PDF p.25. --v is the bar length in percent of the track.</p></aside>
+  </section>
+
+  <!-- ============ L15 · TWO SCREENSHOTS ============ -->
+  <section class="slide std" data-title="Two screenshots">
+    <p class="eyebrow">[Section] · what it means</p>
+    <h2 class="title">[Same job. Different interface.]</h2>
+    <p class="lead">[One line on what to look at.]</p>
+    <div class="body">
+      <div class="grid">
+        <figure>
+          <div class="shot" style="aspect-ratio: 16 / 8.8;" data-placeholder="[Before: screenshot]"></div>
+          <figcaption class="caption">[Too much]</figcaption>
+        </figure>
+        <figure>
+          <div class="shot" style="aspect-ratio: 16 / 8.8;" data-placeholder="[After: screenshot]"></div>
+          <figcaption class="caption accent">[Just enough]</figcaption>
+        </figure>
+      </div>
+    </div>
+    <aside class="notes"><p>Two screenshots with pixel captions, PDF p.15. Put images in assets/ and add &lt;img src="assets/…"&gt; inside .shot.</p></aside>
+  </section>
+
+  <!-- ============ L16 · PRODUCT MOCK ON A LIGHT CARD ============ -->
+  <section class="slide std" data-title="Light card">
+    <p class="eyebrow">[Demo]</p>
+    <h2 class="title">[What our system found]</h2>
+    <p class="lead">[One line of context.]</p>
+    <div class="body">
+      <div class="grid" style="grid-template-columns: 1fr 1fr;">
+        <figure>
+          <div class="card light" style="padding: 40px;">
+            <p class="card-title">[What our system found]</p>
+            <div class="grid" style="grid-template-columns: 1.55fr 1fr; gap: 24px; margin-top: 28px;">
+              <div class="shot light" style="height: 220px;" data-placeholder="[Screenshot of the product working]"></div>
+              <div class="metric-box"><p class="metric sm">−XX%</p><p class="metric-cap">[time to review]</p></div>
+            </div>
+            <p class="card-text accent" style="margin-top: 24px;">[Why it works: one sentence, in plain words]</p>
+          </div>
+          <figcaption class="caption accent">[The work]</figcaption>
+        </figure>
+        <div class="stack" style="--gap: 24px; justify-content: center;">
+          <p class="kicker">[Explain the screenshot in two lines, max.]</p>
+          <p class="note">[A smaller supporting detail.]</p>
+        </div>
+      </div>
+    </div>
+    <aside class="notes"><p>Light card, PDF p.17. Good for a mock of the product screen next to its key number.</p></aside>
+  </section>
+
+  <!-- ============ L17 · SMALL GHOST + BIG CARD WITH ICON LIST ============ -->
+  <section class="slide std" data-title="Context vs focus">
+    <p class="eyebrow">[Section] · 02</p>
+    <h2 class="title">[Analyze the jury,] <em>[not just the case.]</em></h2>
+    <div class="body">
+      <div class="grid" style="grid-template-columns: 1fr 2.13fr;">
+        <div class="card ghost">
+          <p class="label">[Context]</p>
+          <p class="card-title">[Clear as it is.]</p>
+          <p class="card-text" style="margin-top: 14px;">[Supporting line.]</p>
+        </div>
+        <div class="card hi flat">
+          <p class="label">[Focus]</p>
+          <ul class="icon-list">
+            <li><i class="ico users"></i>[Who are they?]</li>
+            <li><i class="ico search"></i>[What do they expect?]</li>
+            <li><i class="ico bulb"></i>[What do they need?]</li>
+          </ul>
+        </div>
+      </div>
+      <p class="kicker sm">[Sentence with] <em>[an accent ending.]</em></p>
+    </div>
+    <aside class="notes"><p>Small ghost card next to a big focus card, PDF p.20.</p></aside>
+  </section>
+
+  <!-- ============ L18 · PRIORITY STACK + WARNING ============ -->
+  <section class="slide std" data-title="Priorities">
+    <p class="eyebrow">[Section] · 05</p>
+    <h2 class="title">[Deploy is a] <em>[bonus.]</em></h2>
+    <div class="body">
+      <div class="grid" style="grid-template-columns: 1.4fr 1fr; align-items: start;">
+        <ol class="priority">
+          <li style="--w: 71%;"><span class="n">2</span><div><b>[Then this]</b><span>[Why second]</span></div></li>
+          <li class="hi"><span class="n">1</span><div><b>[First this]</b><span>[Why first]</span></div></li>
+        </ol>
+        <div class="card warn tight">
+          <p class="label"><i class="ico clock"></i>[Low on time?]</p>
+          <p class="card-title">[What to drop.]</p>
+          <p class="card-text" style="margin-top: 12px;">[What to do instead.]</p>
+        </div>
+      </div>
+      <p class="kicker sm"><span class="soft">[Muted half,]</span> [bright half.]</p>
+    </div>
+    <aside class="notes"><p>Priority stack with a warning box, PDF p.23.</p></aside>
+  </section>
+
+  <!-- ============ L19 · PROFILE: PHOTO + DETAILS ============ -->
+  <section class="slide std" data-title="Profile">
+    <div class="grid" style="grid-template-columns: 518px 1fr; gap: 80px; height: 788px; margin-top: -3px;">
+      <div class="photo"><div class="shot" data-placeholder="[Photo]"></div></div>
+      <div style="padding-top: 3px;">
+        <p class="eyebrow">[Who we are · member 1]</p>
+        <h2 class="title" style="margin-top: 25px;">[Name] <em>[Surname]</em></h2>
+        <p class="lead" style="margin-top: 22px; font-size: 34px;">[Role and one line about them]</p>
+        <ul class="details" style="margin-top: 40px;">
+          <li><span class="logo"></span><b>[Company]</b><span>[Position]</span><span class="when">[Since 2026]</span></li>
+          <li><span class="logo"></span><b>[Company]</b><span>[Position]</span><span class="when">[2025]</span></li>
+          <li><span class="logo"></span><b>[Company]</b><span>[Position]</span><span class="when">[2024]</span></li>
+        </ul>
+      </div>
+    </div>
+    <aside class="notes"><p>Profile, PDF p.3–4. Rarely needed in a 2-minute pitch; handy for an "about the data" slide too (swap the photo for a chart).</p></aside>
+  </section>
+
+  <!-- ============ L20 · ARCHITECTURE ============ -->
+  <!-- Place nodes with grid-column / grid-row. Arrows come from data-edges: "a>b: label" solid, "a~>b" dashed, separated by ";". -->
+  <section class="slide std" data-title="Architecture">
+    <p class="eyebrow">[Architecture]</p>
+    <h2 class="title">[Runs fully local.] <em>[No cloud calls.]</em></h2>
+    <div class="body">
+      <div class="arch" style="--cols: 4; --arch-gap: 80px 96px;" data-edges="ui>api: HTTPS; jury>api: API key; api>pipe: queue; pipe>vlm: [port]; pipe>judge: [port]; pipe>rules; api~>disk: job files">
+        <div class="arch-group" data-label="[Clients]" style="grid-column: 1; grid-row: 1 / 3;">
+          <div class="node ghost" data-node="ui"><b>[Web UI]</b><span>[upload · status · result]</span></div>
+          <div class="node ghost" data-node="jury"><b>[Jury script]</b><span>[POST · GET]</span></div>
+        </div>
+        <div class="node" data-node="api" style="grid-column: 2; grid-row: 1;"><span class="label">[file.py]</span><b>[API server]</b><span>[framework · workers]</span></div>
+        <div class="node hi" data-node="pipe" style="grid-column: 3; grid-row: 1;"><span class="label">[file.py]</span><b>[Pipeline]</b><span>[step → step → step]</span></div>
+        <div class="arch-group" data-label="[GPU · local models]" style="grid-column: 4; grid-row: 1 / 3;">
+          <div class="node" data-node="vlm"><b>[Video model]</b><span>[what it does]</span></div>
+          <div class="node" data-node="judge"><b>[Judge model]</b><span>[what it does]</span></div>
+        </div>
+        <div class="node ghost" data-node="disk" style="grid-column: 2; grid-row: 2;"><b>[Storage]</b><span>[what is kept]</span></div>
+        <div class="node" data-node="rules" style="grid-column: 3; grid-row: 2;"><b>[Rules catalogue]</b><span>[cited sources]</span></div>
+      </div>
+      <p class="kicker sm"><span class="muted">[Why this shape:]</span> [one sentence.]</p>
+    </div>
+    <aside class="notes"><p>Architecture diagram. Boxes are HTML, so they stay editable; arrows are redrawn from data-edges whenever the boxes change.</p></aside>
+  </section>
+
+  <!-- ============ L21 · ANNOTATED SCREENSHOT ============ -->
+  <!-- Pins sit at --x / --y percent of the screenshot. In edit mode you can drag them. -->
+  <section class="slide std" data-title="Annotated screenshot">
+    <p class="eyebrow">[Demo]</p>
+    <h2 class="title">[What the reviewer] <em>[sees.]</em></h2>
+    <div class="body">
+      <div class="grid" style="grid-template-columns: 1fr 560px; align-items: start;">
+        <div class="annot shot" style="aspect-ratio: 16 / 9;" data-placeholder="[Screenshot of the result page]">
+          <span class="pin" style="--x: 18; --y: 16;">1</span>
+          <span class="pin" style="--x: 60; --y: 42;">2</span>
+          <span class="pin" style="--x: 32; --y: 78;">3</span>
+        </div>
+        <ol class="legend">
+          <li>[Verdict]<span>[What it says and when]</span></li>
+          <li>[Evidence frame + timecode]<span>[Why a person can check it]</span></li>
+          <li>[Rule and source]<span>[Document, clause]</span></li>
+        </ol>
+      </div>
+    </div>
+    <aside class="notes"><p>Annotated screenshot. Number of pins = number of legend items.</p></aside>
+  </section>
+
+  <!-- ============ L22 · NUMBER TILES ============ -->
+  <section class="slide std" data-title="Number tiles">
+    <p class="eyebrow">[Results]</p>
+    <h2 class="title">[Three numbers] <em>[that matter.]</em></h2>
+    <p class="lead">[Where they come from: data set, split, scoring.]</p>
+    <div class="body">
+      <div class="grid c3">
+        <div class="card hi"><p class="label">[Metric 1]</p><p class="metric md" style="margin-top: 20px;">XX%</p><p class="metric-cap">[what it measures]<span>[vs baseline]</span></p></div>
+        <div class="card"><p class="label">[Metric 2]</p><p class="metric md" style="margin-top: 20px;">X.X s</p><p class="metric-cap">[what it measures]<span>[vs limit]</span></p></div>
+        <div class="card"><p class="label">[Metric 3]</p><p class="metric md" style="margin-top: 20px;">XX</p><p class="metric-cap">[what it measures]<span>[context]</span></p></div>
+      </div>
+      <p class="note">[Source: script or file that produced these numbers]</p>
+    </div>
+    <aside class="notes"><p>Number tiles. Use 3; with 4, switch to "grid c4" and shorter numbers.</p></aside>
+  </section>
+
+  <!-- ============ L23 · TABLE ============ -->
+  <section class="slide std" data-title="Table">
+    <p class="eyebrow">[Rules and sources]</p>
+    <h2 class="title">[Every flag points to] <em>[a real rule.]</em></h2>
+    <div class="body">
+      <table class="table">
+        <thead>
+          <tr><th>[Type]</th><th>[What is visible]</th><th>[Rule · source]</th><th class="num">[Score]</th></tr>
+        </thead>
+        <tbody>
+          <tr class="hi"><td>[Type 1]</td><td class="soft">[Observable action]</td><td>[Document, clause]</td><td class="num">XX%</td></tr>
+          <tr><td>[Type 2]</td><td class="soft">[Observable action]</td><td>[Document, clause]</td><td class="num">XX%</td></tr>
+          <tr><td>[Type 3]</td><td class="soft">[Observable action]</td><td>[Document, clause]</td><td class="num">XX%</td></tr>
+          <tr><td>[Type 4]</td><td class="soft">[Observable action]</td><td>[Document, clause]</td><td class="num">XX%</td></tr>
+        </tbody>
+      </table>
+      <p class="note">[Sources and links]</p>
+    </div>
+    <aside class="notes"><p>Table. Up to 6 rows fit at this size. In edit mode, ⌥↵ in a cell duplicates the row.</p></aside>
+  </section>
+
+  <!-- ============ L24 · API + JSON ============ -->
+  <section class="slide std" data-title="API">
+    <p class="eyebrow">[API]</p>
+    <h2 class="title">[Two calls.] <em>[One JSON.]</em></h2>
+    <div class="body">
+      <div class="grid" style="grid-template-columns: 1fr 1.3fr; align-items: start;">
+        <div class="stack" style="--gap: 24px;">
+          <div class="card tight"><p class="label accent">POST</p><p class="card-title">/api/v1/analyze</p><p class="card-text">[.mov in, job_id out]</p></div>
+          <div class="card tight"><p class="label accent">GET</p><p class="card-title">/api/v1/jobs/{job_id}</p><p class="card-text">[processing → done, time per video]</p></div>
+          <p class="note">[Auth: X-API-Key header. Never put the key on a slide.]</p>
+        </div>
+<pre class="code">{
+  <span class="k">"job_id"</span>: <span class="s">"[id]"</span>,
+  <span class="k">"status"</span>: <span class="s">"done"</span>,
+  <span class="k">"verdict"</span>: <span class="s">"violation"</span>,
+  <span class="k">"violations"</span>: [{
+    <span class="k">"type"</span>: <span class="s">"[type]"</span>,
+    <span class="k">"timecode_sec"</span>: <span class="n">[44.2]</span>,
+    <span class="k">"description"</span>: <span class="s">"[what is visible]"</span>,
+    <span class="k">"evidence_frames"</span>: [<span class="c">1–3 JPEG</span>]
+  }]
+}</pre>
+      </div>
+    </div>
+    <aside class="notes"><p>API and a real response. Paste a real (shortened) response from the service, never a made-up one.</p></aside>
+  </section>
+
+</main>
+</body>
+</html>

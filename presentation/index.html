@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>[Solution name] · Datathon ’26</title>
+<link rel="stylesheet" href="deck/deck.css">
+<style>
+  /* Footer on content slides. Change the team name here once. */
+  :root { --footer-text: "DATATHON ’26 · TEAM [NAME]"; }
+</style>
+<script defer src="deck/deck.js"></script>
+</head>
+<!-- data-pitch-seconds: target for the rehearsal timer (press T). Finals: 5 min talk + 2 min Q&A (case FAQ #19). -->
+<body data-pitch-seconds="300">
+<main class="deck">
+
+  <!-- ============ 01 · TITLE ============ -->
+  <section class="slide title-slide" data-title="Title">
+    <header class="title-top">
+      <p class="eyebrow-lg">Datathon ’26 · ForteBank case</p>
+      <p class="org">Team [Name]</p>
+    </header>
+
+    <h1 class="title-stack">
+      <span>[What it does]</span>
+      <span class="glow">[Name]</span>
+      <span>[For whom]</span>
+    </h1>
+
+    <ul class="meta">
+      <li>Team [Name]</li>
+      <li>[Date]</li>
+      <li>[Case title]</li>
+    </ul>
+
+    <!-- Pixel bar chart on a platform. Swap for <img class="title-art" src="assets/hero.png" alt=""> if you have a better visual. -->
+    <svg class="title-art" viewBox="0 0 640 860" shape-rendering="crispEdges" aria-hidden="true">
+      <defs>
+        <filter id="title-glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="18"/></filter>
+      </defs>
+      <rect x="80" y="40" width="18" height="18" fill="#6d45e6" opacity="0.7"/>
+      <rect x="49" y="161" width="36" height="36" fill="#6d45e6" opacity="0.85"/>
+      <rect x="562" y="161" width="28" height="28" fill="#9b7bff" opacity="0.7"/>
+      <rect x="534" y="422" width="54" height="54" fill="#b9a6ff" filter="url(#title-glow)" opacity="0.8"/>
+      <rect x="534" y="422" width="54" height="54" fill="#b9a6ff"/>
+      <rect x="21" y="501" width="44" height="44" fill="#4b2aa8"/>
+      <rect x="597" y="621" width="30" height="30" fill="#6d45e6"/>
+
+      <rect x="404" y="182" width="112" height="580" fill="#9b7bff" filter="url(#title-glow)" opacity="0.45"/>
+      <g>
+        <rect x="130" y="592" width="72" height="150" fill="#2a1b5e"/>
+        <rect x="186" y="592" width="16" height="150" fill="#1e1240"/>
+        <rect x="130" y="592" width="72" height="14" fill="#3d2391"/>
+
+        <rect x="228" y="492" width="72" height="250" fill="#3d2391"/>
+        <rect x="284" y="492" width="16" height="250" fill="#2a1b5e"/>
+        <rect x="228" y="492" width="72" height="14" fill="#4b2aa8"/>
+
+        <rect x="326" y="372" width="72" height="370" fill="#4b2aa8"/>
+        <rect x="382" y="372" width="16" height="370" fill="#3d2391"/>
+        <rect x="326" y="372" width="72" height="14" fill="#6d45e6"/>
+
+        <rect x="424" y="202" width="72" height="540" fill="#6d45e6"/>
+        <rect x="480" y="202" width="16" height="540" fill="#4b2aa8"/>
+        <rect x="424" y="202" width="72" height="14" fill="#b9a6ff"/>
+      </g>
+
+      <rect x="57" y="742" width="513" height="63" fill="#4b2aa8"/>
+      <rect x="57" y="742" width="513" height="8" fill="#6d45e6"/>
+      <rect x="562" y="742" width="8" height="63" fill="#2a1b5e"/>
+      <rect x="57" y="805" width="126" height="49" fill="#2a1b5e"/>
+      <rect x="444" y="805" width="126" height="49" fill="#2a1b5e"/>
+    </svg>
+
+    <aside class="notes">
+      <p>About 15 s. Name, then the one-line promise. Don't explain the case: the jury wrote it.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 02 · BRIEF CHECKLIST ============ -->
+  <!-- Copy every requirement from the brief. During the build, mark open ones with class="todo". -->
+  <section class="slide std" data-title="Brief checklist">
+    <p class="eyebrow">The brief · checklist</p>
+    <h2 class="title">Every box in the brief. <em>Ticked.</em></h2>
+    <div class="body">
+      <div class="card">
+        <p class="label">From the brief</p>
+        <ul class="checklist">
+          <li>[Requirement 1, in the brief’s own words]<span class="where">Slide 04 · how it works</span></li>
+          <li>[Requirement 2]<span class="where">Slide 05 · results</span></li>
+          <li>[Requirement 3]<span class="where">Slide 06 · demo</span></li>
+          <li>[Requirement 4]<span class="where">Slide 07 · method</span></li>
+          <li class="todo">[Requirement 5, still open]<span class="where">To do</span></li>
+        </ul>
+      </div>
+    </div>
+    <aside class="notes">
+      <p>About 30 s. Read the requirements fast and point at the ticks. Judges score against this list.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 03 · KEY INSIGHT ============ -->
+  <section class="slide grad" data-title="Key insight">
+    <p class="eyebrow">The insight</p>
+    <h2 class="title-xl">[The one thing]<br><em>[others missed.]</em></h2>
+    <p class="lead">[One sentence with the number that proves it.]</p>
+    <aside class="notes">
+      <p>About 30 s. This is the moment they should remember. Say the number slowly.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 04 · HOW IT WORKS ============ -->
+  <section class="slide std" data-title="How it works">
+    <p class="eyebrow">How it works</p>
+    <h2 class="title">Data in. <em>Answer out.</em></h2>
+    <div class="body">
+      <ol class="flow">
+        <li>[Data in]</li>
+        <li>[Model runs]</li>
+        <li>[Result + why]</li>
+      </ol>
+      <div class="grid c3">
+        <div class="card ghost tight">
+          <p class="label">Input</p>
+          <p class="card-text">[Dataset: rows, columns, period. What we cleaned.]</p>
+        </div>
+        <div class="card ghost tight">
+          <p class="label">Model</p>
+          <p class="card-text">[The model in one line, and why this one.]</p>
+        </div>
+        <div class="card ghost tight">
+          <p class="label">Output</p>
+          <p class="card-text">[What the user gets, and how it is explained.]</p>
+        </div>
+      </div>
+      <p class="kicker sm"><span class="muted">Why it works:</span> [one sentence, in plain words].</p>
+    </div>
+    <aside class="notes">
+      <p>About 45 s. Left to right, one breath per box. No tech stack names.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 05 · RESULTS ============ -->
+  <!-- Bar length: --v is a percentage of the track (0 to 100). -->
+  <section class="slide std" data-title="Results">
+    <p class="eyebrow">Results</p>
+    <h2 class="title">[Metric] up from [A] to <em>[B].</em></h2>
+    <div class="body">
+      <div class="grid" style="grid-template-columns: 600px 1fr; align-items: stretch;">
+        <div class="card hi">
+          <p class="label">On [held-out set]</p>
+          <p class="metric" style="margin-top: 36px;">+XX%</p>
+          <p class="metric-cap">[Metric] vs baseline<span>[N] samples, [split or validation scheme]</span></p>
+        </div>
+        <div class="bars" style="--bar-label: 260px; align-content: center;">
+          <div class="bar ghost" style="--v: 45"><span>[Baseline]</span><span class="bar-fill">[0.61]</span></div>
+          <div class="bar" style="--v: 68"><span>[First try]</span><span class="bar-fill">[0.74]</span></div>
+          <div class="bar hi" style="--v: 92"><span>[Ours]</span><span class="bar-fill">[0.88]</span></div>
+        </div>
+      </div>
+      <p class="kicker sm">[What the number means for the bank, in one line.] <span class="accent">[Money, time or risk.]</span></p>
+    </div>
+    <aside class="notes">
+      <p>About 45 s. Check the result the way the jury will: same metric, same split as the brief.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 06 · DEMO ============ -->
+  <!-- Put the screenshot in assets/ and replace the empty .shot with: <div class="shot"><img src="assets/demo.png" alt=""></div>
+       For a backup video: <div class="shot"><video src="assets/demo.mp4" data-autoplay muted loop playsinline></video></div> -->
+  <section class="slide std" data-title="Demo">
+    <p class="eyebrow">Demo</p>
+    <h2 class="title">What our system <em>found.</em></h2>
+    <div class="body">
+      <div class="grid" style="grid-template-columns: 1fr 500px; align-items: stretch; height: 100%;">
+        <div class="shot" data-placeholder="[Screenshot of the product working]"></div>
+        <div class="stack" style="--gap: 34px;">
+          <div class="card hi grow">
+            <p class="label">Result</p>
+            <p class="metric md" style="margin-top: 28px;">−XX%</p>
+            <p class="metric-cap">[time to review]</p>
+          </div>
+          <div class="card flat tight">
+            <p class="label">Live</p>
+            <p class="card-text" style="margin-top: 14px; color: var(--ink);">[demo.link]</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <aside class="notes">
+      <p>About 60 s. Show one flow: data in, model runs, result and why. Keep a recorded backup ready.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 07 · METHOD (named and cited) ============ -->
+  <section class="slide std" data-title="Method">
+    <p class="eyebrow">Under the hood</p>
+    <h2 class="title">Why we used <em>[technique].</em></h2>
+    <div class="body">
+      <ul class="quotes">
+        <li data-key="Before">“[What the obvious approach did, and what went wrong.]”</li>
+        <li class="hi" data-key="After">
+          <div>
+            “[What we found], so we used <b>[Technique]</b> ([Author et al., Venue Year]).”
+            <p class="delta">[Metric]: [__%] → [__%]</p>
+          </div>
+        </li>
+      </ul>
+      <p class="note">[Paper or repo link]</p>
+    </div>
+    <aside class="notes">
+      <p>About 30 s. Name the technique, cite the paper, say what it fixed. Skip this slide if nothing here is niche.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 08 · TEAM ============ -->
+  <!-- Photos: <div class="avatar"><img src="assets/team-1.jpg" alt=""></div>. For 3 or 5 people use class "grid c3" or "grid c5". -->
+  <section class="slide std" data-title="Team">
+    <p class="eyebrow">The team</p>
+    <h2 class="title">Team <em>[Name].</em></h2>
+    <div class="body">
+      <div class="grid c4">
+        <div class="card bevel hi member">
+          <p class="num">01</p>
+          <div class="avatar">[A]</div>
+          <p class="card-title">[Name Surname]</p>
+          <p class="role">[Role]</p>
+          <p class="card-text">[What they built]</p>
+        </div>
+        <div class="card bevel member">
+          <p class="num">02</p>
+          <div class="avatar">[B]</div>
+          <p class="card-title">[Name Surname]</p>
+          <p class="role">[Role]</p>
+          <p class="card-text">[What they built]</p>
+        </div>
+        <div class="card bevel member">
+          <p class="num">03</p>
+          <div class="avatar">[C]</div>
+          <p class="card-title">[Name Surname]</p>
+          <p class="role">[Role]</p>
+          <p class="card-text">[What they built]</p>
+        </div>
+        <div class="card bevel member">
+          <p class="num">04</p>
+          <div class="avatar">[D]</div>
+          <p class="card-title">[Name Surname]</p>
+          <p class="role">[Role]</p>
+          <p class="card-text">[What they built]</p>
+        </div>
+      </div>
+    </div>
+    <aside class="notes">
+      <p>About 15 s. Names only, no CVs.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 09 · Q&A ============ -->
+  <section class="slide closing" data-title="Q&A">
+    <p class="eyebrow">Q&amp;A</p>
+    <h2 class="title-glow">Questions?</h2>
+    <p class="lead">[One-line recap: what we built and the number.]</p>
+    <ul class="contacts">
+      <li><span class="label">Demo</span><a class="value" href="#">[demo.link]</a></li>
+      <li><span class="label">Code</span><a class="value" href="#">[github.com/team/repo]</a></li>
+      <li><span class="label">Telegram</span><a class="value" href="#">[@handle]</a></li>
+    </ul>
+    <p class="signoff">Team [Name] · Datathon ’26 · ForteBank case</p>
+
+    <div class="closing-art" aria-hidden="true">
+      <i class="glass" style="left: 1301px; top: 160px; width: 240px; height: 240px;"></i>
+      <i class="bright" style="left: 1539px; top: 140px; width: 182px; height: 359px;"></i>
+      <i style="left: 1301px; top: 500px; width: 121px; height: 121px; background: #6d45e6;"></i>
+      <i class="glass" style="left: 1422px; top: 500px; width: 280px; height: 281px;"></i>
+      <i style="left: 1721px; top: 562px; width: 61px; height: 59px; background: #b9a6ff;"></i>
+      <i style="left: 1641px; top: 823px; width: 141px; height: 138px; background: #3d2391;"></i>
+    </div>
+    <aside class="notes">
+      <p>Have answers ready for: data leakage, how it scales, what you would do with one more week. Answer honestly; don't bring up weak spots yourself.</p>
+    </aside>
+  </section>
+
+</main>
+</body>
+</html>
