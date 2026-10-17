@@ -1,7 +1,8 @@
-"""Video access: probe and single-frame JPEG extraction (more helpers land in a later task)."""
+"""Video access: probe, single-frame JPEG extraction, window cutting and evidence frames."""
 from __future__ import annotations
 
 import io
+import subprocess
 from fractions import Fraction
 
 import av
@@ -99,3 +100,38 @@ def jpeg_at(path, t: float, quality: int = 90) -> Frame:
     except Exception as e:
         raise VideoError(f"cannot decode frame: {type(e).__name__}: {e}") from e
     return Frame(t=t, jpeg=buf.getvalue())
+
+
+def cut_window(path, start: float, end: float, out_path: str) -> str:
+    """Re-encode [start, end] (clamped to [0, duration]) to out_path as an upright H.264 clip."""
+    dur, _, _, _ = probe(path)
+    start = max(float(start), 0.0)
+    end = min(float(end), dur)
+    if end - start <= 0.01:
+        raise VideoError(f"empty window [{start:.2f}, {end:.2f}] in a {dur:.2f}s video")
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", str(path),
+           "-t", f"{end - start:.3f}", "-an", "-c:v", "libx264", "-preset", "veryfast",
+           "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_path)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=60)
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or b"").decode("utf-8", "replace").strip()[-500:]
+        raise VideoError(f"ffmpeg failed: {tail}") from e
+    except (subprocess.TimeoutExpired, OSError) as e:
+        raise VideoError(f"ffmpeg failed: {type(e).__name__}: {e}") from e
+    return out_path
+
+
+def evidence(path, timecode: float, t_start: float, t_end: float) -> list[Frame]:
+    """Up to 3 JPEG frames at the timecode, window start and window end; the first is the timecode's.
+    Times are clamped to [0, duration - 1/fps] and any within 0.5 s of a kept one is dropped."""
+    dur, fps, _, _ = probe(path)
+    hi = max(dur - 1.0 / fps, 0.0)
+    kept: list[float] = []
+    for t in (timecode, t_start, t_end):
+        t = min(max(float(t), 0.0), hi)
+        if all(abs(t - k) >= 0.5 for k in kept):
+            kept.append(t)
+        if len(kept) == 3:
+            break
+    return [jpeg_at(path, t, 90) for t in kept]
