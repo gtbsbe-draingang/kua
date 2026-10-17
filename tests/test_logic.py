@@ -266,3 +266,22 @@ def test_even_cells_spread_top_k_cells_over_the_clip():
     assert all(c.rank is None and c.best is None and c.members == () for c in long)
     assert (long[0].t_start, long[0].t_end, long[0].centre) == (12.0, 16.0, 14.0)
     assert [(c.t_start, c.t_end) for c in even_cells(22.0, 4.0, 2)] == [(4.0, 8.0), (16.0, 20.0)]
+
+
+def test_rules_from_hits_order_dedup_and_other_last():
+    from pipeline.logic import rules_from_hits
+    cr = {"V1:20": ["cash_unattended", "previous_cash_on_desk"], "V1:42": ["deposit_not_counted"]}
+    hits = ["V1:20", "V1:42", "V1:20"]
+    assert rules_from_hits(hits, cr, None, 4) == [
+        "cash_unattended", "previous_cash_on_desk", "deposit_not_counted", "other"]
+    assert rules_from_hits(hits, cr, "deposit_not_counted", 2) == ["deposit_not_counted", "cash_unattended", "other"]
+    assert rules_from_hits(["V1:42", "V9:9"], {**cr, "V1:42": ["other", "deposit_not_counted"]}, "other") == [
+        "deposit_not_counted", "other"]
+
+
+def test_rules_from_hits_empty_gives_first_and_other():
+    from pipeline.logic import rules_from_hits
+    assert rules_from_hits([], {}, None) == ["other"]
+    assert rules_from_hits([], {}, "none") == ["other"]
+    assert rules_from_hits([], {}, "cash_unattended") == ["cash_unattended", "other"]
+    assert rules_from_hits(["V1:20"], {}, "cash_unattended") == ["cash_unattended", "other"]

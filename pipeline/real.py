@@ -47,8 +47,8 @@ import yaml
 
 from pipeline import clients, frames, videojev, zoom
 from pipeline.logic import (accept_judge, cells, even_cells, judge_candidates, keep_decision, merge_events_indexed,
-                            pair_timeline, pick_timecode, rank_curve, sample_times, segments, top_candidates,
-                            top_cells)
+                            pair_timeline, pick_timecode, rank_curve, rules_from_hits, sample_times, segments,
+                            top_candidates, top_cells)
 from pipeline.types import Event, Frame, PipelineResult
 from rules import load_rules
 
@@ -60,6 +60,7 @@ WINDOW_PAD_SEC = 2.0
 POOL_SIZE = 6
 VERIFY_MAX_SEC, VERIFY_RESERVE_SEC, VERIFY_MIN_SEC = 60.0, 20.0, 5.0
 JUDGE_MAX_SEC, JUDGE_RESERVE_SEC, JUDGE_MIN_SEC = 30.0, 10.0, 3.0
+RETRIEVE_K, RETRIEVE_MAX_SEC = 8, 5.0  # regulation retrieval for the judge's candidate rules
 # A type choice may wait for the model until this much time is left, so the check and the frames still fit.
 CHOOSE_MIN_LEFT_SEC = 30.0
 # Grounding may wait for the model (another job's call) until this much time is left: grounding itself (about
@@ -134,6 +135,7 @@ class _Config:
     option_ids: list[str]  # the rule id of each option; "none" for NONE_OPTION
     th: dict
     rules_version: str
+    clause_rules: dict[str, list[str]] = field(default_factory=dict)  # corpus clause id -> detectable rules citing it
 
 
 _CONFIG: _Config | None = None
@@ -180,6 +182,24 @@ def _load_thresholds(path: Path) -> dict:
     return th
 
 
+def _clause_rules(rules: dict[str, dict], detectable: list[str]) -> dict[str, list[str]]:
+    """Corpus clause id -> the detectable rules whose catalogue citation quote lies in that clause. A quote the corpus
+    does not hold (a suspended clause) is skipped. {} and one warning when the corpus cannot be read."""
+    try:
+        from rag import corpus
+        clauses = corpus.load_clauses()
+        out: dict[str, list[str]] = {}
+        for rid in detectable:
+            for c in rules[rid].get("citations") or []:
+                clause = corpus.find_quote(clauses, str(c.get("quote") or ""))
+                if clause is not None and rid not in out.setdefault(clause.id, []):
+                    out[clause.id].append(rid)
+        return out
+    except Exception as e:
+        log.warning("clause-to-rule map not built (%s): judge candidates will not use retrieval", type(e).__name__)
+        return {}
+
+
 def _load_config(rules_path: Path, th_path: Path) -> _Config:
     raw = rules_path.read_bytes()
     rules = load_rules(rules_path, strict=True)
@@ -207,7 +227,7 @@ def _load_config(rules_path: Path, th_path: Path) -> _Config:
     th = _load_thresholds(th_path)
     digest = hashlib.sha256(raw).hexdigest()[:12]
     return _Config(rules, detectable, queries, [query_rule[q] for q in queries], options, detectable + ["none"],
-                   th, f"v{version} sha256:{digest}")
+                   th, f"v{version} sha256:{digest}", _clause_rules(rules, detectable))
 
 
 def _config() -> _Config:
@@ -658,11 +678,25 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
         # multi mode ranks the rules by the check's answers; without any (or in single mode) by VideoJev's choice
         answered = {r: p for r, p in (c.p_rules or {}).items() if p is not None}
         if grid:  # no VideoJev choice: the check's own answers, if any
-            return judge_candidates(answered, ev.rule_id if ev.rule_id in cfg.detectable else "")
-        return judge_candidates(answered or ev.type_probs or {c.rule_id: 1.0},
-                                c.vtype if c.vtype in cfg.detectable else "")
+            ranking, vtype = answered, ev.rule_id if ev.rule_id in cfg.detectable else ""
+        else:
+            ranking, vtype = answered or ev.type_probs, c.vtype if c.vtype in cfg.detectable else ""
+        if not ranking:  # nothing ranks the rules: let the regulation retrieval choose them
+            t = min(RETRIEVE_MAX_SEC, _left(deadline) - JUDGE_RESERVE_SEC)
+            ids = clients.retrieve(ev.observation, RETRIEVE_K, t) if t >= JUDGE_MIN_SEC else []
+            if ids:
+                return rules_from_hits(ids, cfg.clause_rules, vtype or None)
+        if grid:
+            return judge_candidates(answered, vtype)
+        return judge_candidates(answered or ev.type_probs or {c.rule_id: 1.0}, vtype)
 
-    cand_ids = [candidate_ids(ev, c) for ev, c in kept_evs]
+    if len(kept_evs) > 1:  # retrieval calls wait on the network: run them side by side
+        with ThreadPoolExecutor(max_workers=min(POOL_SIZE, len(kept_evs)), thread_name_prefix="retrieve") as rpool:
+            cand_ids = list(rpool.map(lambda p: candidate_ids(*p), kept_evs))
+    else:
+        cand_ids = [candidate_ids(ev, c) for ev, c in kept_evs]
+    for (ev, _), ids in zip(kept_evs, cand_ids):
+        ev.judge_candidates = ids
     answers: dict[int, dict | None] = {}
     jt = min(JUDGE_MAX_SEC, _left(deadline) - JUDGE_RESERVE_SEC)
     if kept_evs and jt >= JUDGE_MIN_SEC:
