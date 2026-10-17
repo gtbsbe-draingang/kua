@@ -1,0 +1,43 @@
+version: 1
+rules:
+  - id: other
+    name: "Иное нарушение кассовых операций"
+    seen_in_training: false
+    detectable: true
+    severity: medium
+    omission: false
+    visual_criteria: ["cash or valuables are handled in a way that is not controlled by the cashier"]
+    never_claim: ["amount of cash", "whether the operation was posted", "identity of any person"]
+    grounding_queries:
+      - "cash is left unattended on the desk"
+      - "a person who is not the cashier reaches into the cash area"
+    choice_option: "other irregularity in cash handling"
+    verify_prompt: "Does the video show cash being handled in a way that is not controlled by the cashier?"
+    why: "Действия с наличными выглядят не соответствующими порядку кассовых операций; требуется проверка сотрудником."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот и монет в банках второго уровня ..., утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231"
+        clause: ""
+        quote: "TODO"
+        url: "https://adilet.zan.kz/rus/docs/"
+        edition_checked: "TODO"
+
+  - id: cash_unattended
+    name: "Оставление наличных без присмотра"
+    seen_in_training: true
+    detectable: true
+    severity: high
+    omission: false
+    visual_criteria: ["cash lies exposed on the desk", "cashier leaves or turns away"]
+    never_claim: ["amount of cash", "whether the operation was posted"]
+    grounding_queries:
+      - "the cashier walks away leaving cash on the counter"
+      - "cash is left unattended on the desk"
+    choice_option: "cash left unattended"
+    verify_prompt: "Does the cashier leave cash unattended and out of their control?"
+    why: "Наличные оставлены без контроля кассира, что может указывать на нарушение требования о сохранности ценностей."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот и монет в банках второго уровня ..., утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231"
+        clause: "п. __"
+        quote: "TODO"
+        url: "https://adilet.zan.kz/rus/docs/"
+        edition_checked: "TODO"

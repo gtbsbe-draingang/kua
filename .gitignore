@@ -1,0 +1,10 @@
+docs/
+graphify-out/
+.venv/
+data/clips/
+runs/
+jobs/
+*.mov
+__pycache__/
+.pytest_cache/
+.superpowers/
