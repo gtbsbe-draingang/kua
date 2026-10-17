@@ -1,0 +1,15 @@
+HIT  leave_workplace            found=[('00:00:26', '22', 'left during service of client 1')]
+HIT  accept_no_count            found=[('00:00:15', '20', 'cash taken, not counted while client present')]
+HIT  payout_no_count            found=[('00:00:22', '31', 'cash handed over uncounted')]
+HIT  phone_in_cash_room         found=[('00:00:30', '42', 'packing without controlling employee'), ('00:00:16', '12', 'phone_camera')]
+HIT  stranger_in_cash_room      found=[('00:00:10', '16', 'door_open'), ('00:00:11', '41', 'outsider_in_room'), ('00:00:30', '80', 'keys_unattended')]
+HIT  bag_seal_unchecked         found=[('00:00:10', '24', 'bag opened without checking seal'), ('00:00:17', '42', 'packing without controlling employee')]
+MISS no_detector                found=[]
+      events: [('00:00:00', 'service_start', 1), ('00:00:03', 'id_check', 1), ('00:00:09', 'take_cash', 1), ('00:00:09', 'count_cash', 1), ('00:00:25', 'store_cash', None), ('00:00:29', 'service_end', 1)]
+HIT  bundling_alone             found=[('00:00:05', '42', 'packing without controlling employee')]
+HIT  keys_left                  found=[('00:00:05', '80', 'keys_unattended'), ('00:00:07', '20', 'cash_unattended'), ('00:00:12', '41', 'outsider_in_room')]
+HIT  prev_client_money_on_desk  found=[('00:00:00', '19', 'no ID check'), ('00:00:13', '20', 'cash_unattended')]
+HIT  no_identification          found=[('00:00:04', '19', 'no ID check')]
+HIT  door_open                  found=[('00:00:05', '16', 'door_open')]
+
+caught 11/12  extra (not expected) reports 6, 0.5 per log

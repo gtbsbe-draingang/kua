@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+openai==1.59.7
+pymilvus==2.5.14
+# regulation index (regs/); torch-free because embeddings come from REGS_EMBED_BASE_URL
+snowballstemmer==3.1.1
+scikit-learn==1.9.1
+sentence-transformers==6.1.0   # cross-encoder reranker (regs/rerank.py)
+transformers==5.14.1
+beautifulsoup4==4.15.0
+requests>=2.31
+pyyaml>=6.0
