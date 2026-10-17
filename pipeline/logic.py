@@ -1,6 +1,7 @@
 """Pure decision logic of the review pipeline: no I/O, no models."""
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 from pipeline.types import Event
@@ -11,11 +12,12 @@ def _r(x: float) -> float:
 
 
 def segments(probs: list[float], step_sec: float, cand: float) -> list[tuple[float, float, float]]:
-    """Maximal runs of consecutive probs >= cand as (start, end, max prob); sample i is at i*step_sec."""
+    """Maximal runs of consecutive probs >= cand as (start, end, max prob); sample i is at i*step_sec.
+    NaN never reaches cand."""
     out: list[tuple[float, float, float]] = []
     i, n = 0, len(probs)
     while i < n:
-        if probs[i] < cand:
+        if not probs[i] >= cand:
             i += 1
             continue
         j = i
@@ -55,28 +57,35 @@ def keep_decision(ground: float, verify: float | None, vlm_ok: bool, th: dict) -
 
 def merge_events(events: list[Event], merge_sec: float) -> list[Event]:
     """Chain-merge kept events of the same rule whose timecodes are within merge_sec."""
-    passthrough = [e for e in events if not e.kept]
-    by_rule: dict[str, list[Event]] = {}
-    for e in events:
+    return [e for e, _ in merge_events_indexed(events, merge_sec)]
+
+
+def merge_events_indexed(events: list[Event], merge_sec: float) -> list[tuple[Event, int]]:
+    """merge_events, with the index of the input event each output event copies: a merged group's
+    highest-scoring member, or the (rejected) event itself."""
+    passthrough = [(e, i) for i, e in enumerate(events) if not e.kept]
+    by_rule: dict[str, list[int]] = {}
+    for i, e in enumerate(events):
         if e.kept:
-            by_rule.setdefault(e.rule_id, []).append(e)
-    merged: list[Event] = []
-    for evs in by_rule.values():
-        evs = sorted(evs, key=lambda e: e.timecode)
-        group = [evs[0]]
-        for e in evs[1:]:
-            if e.timecode - group[-1].timecode <= merge_sec:
-                group.append(e)
+            by_rule.setdefault(e.rule_id, []).append(i)
+    merged: list[tuple[Event, int]] = []
+    for idx in by_rule.values():
+        idx = sorted(idx, key=lambda i: events[i].timecode)
+        group = [idx[0]]
+        for i in idx[1:]:
+            if events[i].timecode - events[group[-1]].timecode <= merge_sec:
+                group.append(i)
             else:
-                merged.append(_collapse(group))
-                group = [e]
-        merged.append(_collapse(group))
-    return sorted(passthrough + merged, key=lambda e: e.timecode)
+                merged.append(_collapse(events, group))
+                group = [i]
+        merged.append(_collapse(events, group))
+    return sorted(passthrough + merged, key=lambda x: x[0].timecode)
 
 
-def _collapse(group: list[Event]) -> Event:
-    best = max(group, key=lambda e: e.ground_score)
-    return replace(best, t_start=min(e.t_start for e in group), t_end=max(e.t_end for e in group))
+def _collapse(events: list[Event], group: list[int]) -> tuple[Event, int]:
+    best = max(group, key=lambda i: events[i].ground_score)
+    return replace(events[best], t_start=min(events[i].t_start for i in group),
+                   t_end=max(events[i].t_end for i in group)), best
 
 
 def pick_timecode(probs: list[float], step_sec: float, t_start: float, t_end: float,
@@ -106,3 +115,28 @@ def judge_candidates(type_probs: dict[str, float], verify_type: str, k: int = 3)
 
 def accept_judge(rule_id: str | None, candidates: list[str]) -> bool:
     return rule_id is not None and rule_id in candidates
+
+
+def sample_times(duration: float, fps: float, max_frames: int | None = None) -> list[float]:
+    """Frame times VideoJev samples from a clip: k/fps while < duration; above max_frames,
+    max_frames frames spread evenly over the clip instead (VideoJev's sampling_grid)."""
+    if duration <= 0 or fps <= 0:
+        raise ValueError("duration and fps must be positive")
+    times = [k / fps for k in range(math.ceil(duration * fps)) if k / fps < duration]
+    if max_frames is not None and len(times) > max_frames:
+        eff = max_frames / duration
+        times = [k / eff for k in range(max_frames)]
+    return times
+
+
+def pair_timeline(frame_times: list[float], duration: float) -> tuple[list[float], list[tuple[float, float]]]:
+    """VideoJev scores one value per pair of sampled frames. Score i stands for the midpoint of frames
+    2i and 2i+1 (an odd last frame pairs with itself); its cell runs halfway to the neighbouring pairs,
+    and the outer cells reach 0 and the duration (VideoJev's pair_timeline)."""
+    t = [float(x) for x in frame_times]
+    if not t:
+        raise ValueError("no frame times")
+    last = len(t) - 1
+    centres = [(t[i] + t[min(i + 1, last)]) / 2 for i in range(0, len(t), 2)]
+    edges = [0.0] + [(t[i] + t[i + 1]) / 2 for i in range(1, last, 2)] + [float(duration)]
+    return centres, [(edges[k], edges[k + 1]) for k in range(len(centres))]

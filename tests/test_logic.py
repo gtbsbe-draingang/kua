@@ -125,3 +125,37 @@ def test_judge_candidates_dedupe_and_empty_verify():
     assert judge_candidates(probs, "") == ["a", "b", "other"]
     assert judge_candidates(probs, "none") == ["a", "b", "other"]
     assert judge_candidates({"b": 0.5, "a": 0.5}, "") == ["a", "b", "other"]
+
+
+def test_segments_nan_is_never_a_candidate():
+    nan = float("nan")
+    assert segments([nan, 0.5, nan, nan], 1.0, 0.25) == [(1.0, 2.0, 0.5)]
+    assert segments([nan, nan], 0.5, 0.25) == []
+
+
+def test_sample_times_fixed_fps_and_cap():
+    from pipeline.logic import sample_times
+    assert sample_times(6.0, 2.0) == [k / 2 for k in range(12)]
+    assert sample_times(5.9, 2.0) == [k / 2 for k in range(12)]  # 5.5 < 5.9
+    assert sample_times(5.5, 2.0) == [k / 2 for k in range(11)]  # 5.5 is not < 5.5
+    capped = sample_times(10.0, 4.0, max_frames=8)  # 40 > 8: 8 uniform frames at 0.8 fps
+    assert len(capped) == 8 and capped[1] == 1.25 and capped[-1] == 8.75
+
+
+def test_pair_timeline_even_and_odd():
+    from pipeline.logic import pair_timeline
+    times, bounds = pair_timeline([0.0, 0.5, 1.0, 1.5], 2.0)
+    assert times == [0.25, 1.25] and bounds == [(0.0, 0.75), (0.75, 2.0)]
+    times, bounds = pair_timeline([0.0, 0.5, 1.0], 1.5)  # odd: the last pair is one real frame
+    assert times == [0.25, 1.0] and bounds == [(0.0, 0.75), (0.75, 1.5)]
+    with pytest.raises(ValueError):
+        pair_timeline([], 1.0)
+
+
+def test_merge_events_indexed_links_each_output_to_its_source():
+    from pipeline.logic import merge_events_indexed
+    evs = [_ev("r", 10.0, 0.5), _ev("x", 11.0, kept=False), _ev("r", 12.0, 0.9), _ev("r", 20.0, 0.4)]
+    out = merge_events_indexed(evs, 3.0)
+    assert [(e.rule_id, e.timecode, i) for e, i in out] == [("x", 11.0, 1), ("r", 12.0, 2), ("r", 20.0, 3)]
+    assert (out[1][0].t_start, out[1][0].t_end) == (9.0, 13.0)
+    assert [e for e, _ in out] == merge_events(evs, 3.0)

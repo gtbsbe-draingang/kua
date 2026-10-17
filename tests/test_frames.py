@@ -1,5 +1,7 @@
 import io
+import subprocess
 
+import av
 import pytest
 from PIL import Image
 
@@ -71,3 +73,118 @@ def test_evidence_three_distinct(portrait_clip):
     fr = evidence(portrait_clip, 3.0, 1.0, 5.0)
     assert len(fr) == 3 and abs(fr[0].t - 3.0) < 0.05
     assert all(f.jpeg[:2] == b"\xff\xd8" for f in fr)
+
+
+def test_evidence_half_second_apart_is_kept_despite_float_error(portrait_clip):
+    from pipeline.frames import evidence
+    assert abs(0.2 - 0.7) < 0.5  # 0.49999999999999994 in binary floating point
+    fr = evidence(portrait_clip, 0.7, 0.2, 1.2)
+    assert [round(f.t, 6) for f in fr] == [0.7, 0.2, 1.2]
+
+
+def _failing_ffmpeg(calls):
+    def run(cmd, **kw):
+        calls.append(cmd)
+        with open(cmd[-1], "wb") as f:
+            f.write(b"partial")
+        raise subprocess.CalledProcessError(1, cmd, stderr=b"boom")
+    return run
+
+
+def test_window_failure_removes_partial_output(portrait_clip, tmp_path, monkeypatch):
+    from pipeline import frames
+    calls = []
+    monkeypatch.setattr(frames.subprocess, "run", _failing_ffmpeg(calls))
+    out = tmp_path / "w.mp4"
+    with pytest.raises(VideoError, match="boom"):
+        frames.cut_window(portrait_clip, 1, 3, str(out))
+    assert not out.exists() and "-nostdin" in calls[0]
+
+
+def _coded(path):
+    with av.open(str(path)) as c:
+        s = c.streams.video[0]
+        first = next(c.decode(s))
+        return s.codec_context.name, s.codec_context.width, s.codec_context.height, int(first.rotation or 0)
+
+
+def test_normalize_keeps_upright_h264(portrait_clip, tmp_path):
+    from pipeline.frames import normalize
+    out = tmp_path / "norm.mp4"
+    assert normalize(portrait_clip, str(out)) == str(portrait_clip)
+    assert not out.exists()
+
+
+def test_normalize_rotated_gives_upright_h264_copy(rotated_clip, tmp_path):
+    from pipeline.frames import normalize
+    out = str(tmp_path / "norm.mp4")
+    assert normalize(rotated_clip, out) == out
+    assert _coded(out) == ("h264", 848, 464, 0)
+    assert abs(probe(out)[0] - 6.0) < 0.2
+
+
+def test_normalize_transcodes_other_codecs(tmp_path):
+    from pipeline.frames import normalize
+    src = tmp_path / "mpeg4.mov"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30",
+                    "-t", "2", "-c:v", "mpeg4", str(src)], check=True)
+    out = str(tmp_path / "norm.mp4")
+    assert normalize(src, out) == out and _coded(out) == ("h264", 320, 240, 0)
+
+
+def test_normalize_garbage_and_failure_cleanup(rotated_clip, tmp_path, monkeypatch):
+    from pipeline import frames
+    bad = tmp_path / "bad.mov"
+    bad.write_text("nope")
+    with pytest.raises(VideoError):
+        frames.normalize(bad, str(tmp_path / "n1.mp4"))
+    calls = []
+    monkeypatch.setattr(frames.subprocess, "run", _failing_ffmpeg(calls))
+    out = tmp_path / "n2.mp4"
+    with pytest.raises(VideoError, match="boom"):
+        frames.normalize(rotated_clip, str(out))
+    assert not out.exists() and "-nostdin" in calls[0]
+
+
+def _decode_all(path):
+    with av.open(str(path)) as c:
+        return sum(1 for _ in c.decode(c.streams.video[0]))
+
+
+def test_mpeg4_encoder_override_gives_decodable_outputs(portrait_clip, rotated_clip, tmp_path, monkeypatch):
+    from pipeline import frames
+    monkeypatch.setenv("VIDEO_ENCODER", "mpeg4")
+    assert frames.video_encoder() == "mpeg4"
+    w = frames.cut_window(portrait_clip, 1, 3, str(tmp_path / "w.mp4"))
+    dur, _, width, height = probe(w)
+    assert abs(dur - 2.0) <= 0.1 and (width, height) == (464, 848) and _coded(w)[0] == "mpeg4"
+    assert abs(_decode_all(w) - 60) <= 3
+    n = frames.normalize(rotated_clip, str(tmp_path / "n.mp4"))
+    assert _coded(n) == ("mpeg4", 848, 464, 0) and abs(probe(n)[0] - 6.0) <= 0.1
+    assert abs(_decode_all(n) - 180) <= 3
+    mp4v = tmp_path / "mp4v.mov"  # already the encoder's codec, upright, at t=0: used as is
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30",
+                    "-t", "1", "-c:v", "mpeg4", str(mp4v)], check=True)
+    assert frames.normalize(mp4v, str(tmp_path / "n2.mp4")) == str(mp4v)
+
+
+def test_encoder_detection_prefers_x264_then_openh264_then_mpeg4(monkeypatch):
+    from pipeline import frames
+    monkeypatch.delenv("VIDEO_ENCODER", raising=False)
+    monkeypatch.setattr(frames, "_usable_encoders", lambda ffmpeg: frozenset({"libopenh264", "mpeg4"}))
+    assert frames.video_encoder() == "libopenh264"
+    monkeypatch.setattr(frames, "_usable_encoders", lambda ffmpeg: frozenset())
+    assert frames.video_encoder() == "mpeg4"  # native, always there
+    monkeypatch.setattr(frames, "_usable_encoders", lambda ffmpeg: frozenset({"libx264", "mpeg4"}))
+    assert frames.video_encoder() == "libx264"
+    monkeypatch.setenv("VIDEO_ENCODER", "nonsense")
+    with pytest.raises(VideoError, match="VIDEO_ENCODER"):
+        frames.video_encoder()
+
+
+def test_encoder_probe_runs_a_real_encode():
+    from pipeline import frames
+    frames._usable_encoders.cache_clear()
+    usable = frames._usable_encoders("ffmpeg")
+    assert "mpeg4" in usable
+    assert frames._usable_encoders("/nonexistent/ffmpeg") == frozenset()
