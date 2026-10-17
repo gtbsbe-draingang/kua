@@ -1,0 +1,163 @@
+# Retrieval check: a description of something visible on video -> the clause(s) to cite.
+# Written by hand from regulatory_sources.md, in the two styles the pipeline produces:
+# Russian observations (InternVideo3) and English visual criteria (rules.yaml).
+# expect lists "<act code>:<clause>"; a hit on any of them counts.
+# This is a small sanity set written by the same people as the index, not an independent benchmark.
+# `queries` (dev) shaped the subclause chunks, the glossary and the reranker settings.
+# `holdout` was written before the reranker existed and is never used to choose settings;
+# report it separately. Do not tune on it; add new tuning cases to `queries`.
+queries:
+  - q: "кассир встает и уходит с рабочего места, пока клиент стоит у окна кассы"
+    expect: ["V1900019680:22"]
+  - q: "the cashier walks away from the desk in the middle of serving a client"
+    expect: ["V1900019680:22"]
+  - q: "кассир принимает деньги от клиента и не пересчитывает их"
+    expect: ["V1900019680:20", "V1900019680:19"]
+  - q: "cashier takes the client's cash and puts it in the drawer without counting it"
+    expect: ["V1900019680:20", "V1900019680:19"]
+  - q: "кассир выдает деньги клиенту без пересчета в его присутствии"
+    expect: ["V1900019680:31"]
+  - q: "cashier hands cash to the client without counting it in front of them"
+    expect: ["V1900019680:31"]
+  - q: "на столе кассира открыто лежат деньги, принятые от предыдущих клиентов"
+    expect: ["V1900019680:20"]
+  - q: "cash from earlier clients is left lying open on the counter instead of in a locked drawer"
+    expect: ["V1900019680:20"]
+  - q: "кассир пользуется смартфоном на рабочем месте в кассе"
+    expect: ["V1900019680:12"]
+  - q: "cashier uses a mobile phone with a camera inside the cash room"
+    expect: ["V1900019680:12"]
+  - q: "личная сумка и кошелек кассира лежат на рабочем месте"
+    expect: ["V1900019680:12", "V1900018545:41"]
+  - q: "посторонний человек заходит в помещение кассы"
+    expect: ["V1900018545:41", "V2000020075:8", "V2000020075:16", "V1900019680:75"]
+  - q: "an unauthorized person enters the cashier booth behind the counter"
+    expect: ["V1900018545:41", "V2000020075:8", "V2000020075:16", "V1900019680:75"]
+  - q: "дверь кассы открыта во время работы"
+    expect: ["V2000020075:16", "V2000020075:8"]
+  - q: "кассир принимает инкассаторскую сумку и не проверяет пломбу"
+    expect: ["V1900019680:24", "V1900019680:107"]
+  - q: "cashier accepts the cash-collection bag without checking the seal"
+    expect: ["V1900019680:24", "V1900019680:107"]
+  - q: "сумка инкассатора повреждена, кассир вскрывает ее и пересчитывает деньги"
+    expect: ["V1900019680:25"]
+  - q: "банкноты не проверяются на подлинность на детекторе"
+    expect: ["V1900019680:19", "V1900019680:36", "V1900019680:57", "V1900019680:9", "V1900019680:41"]
+  - q: "the cashier does not run the banknotes through the counterfeit detector"
+    expect: ["V1900019680:19", "V1900019680:36", "V1900019680:57", "V1900019680:9", "V1900019680:41"]
+  - q: "кассир пересчитывает и упаковывает деньги один, без контролирующего работника"
+    expect: ["V1900019680:42"]
+  - q: "cashier counts and bundles banknotes alone without a second employee watching"
+    expect: ["V1900019680:42"]
+  - q: "инкассация проводится на виду у посторонних лиц"
+    expect: ["V2000020075:21"]
+  - q: "клиент отходит от кассы, не пересчитав полученные деньги"
+    expect: ["V1900019680:35"]
+  - q: "ключи от сейфа оставлены в замке ящика рабочего места"
+    expect: ["V1900019680:80", "V1900019680:76"]
+  - q: "keys to the safe are handed to another person"
+    expect: ["V1900019680:80", "V1900019680:76"]
+  - q: "посторонний входит в кладовую с деньгами"
+    expect: ["V1900019680:75"]
+
+  # reported 2026-10-17: the long п. 35 (the client recounts) outranked the cashier's duty
+  - q: "кассир принимает деньги без пересчета в присутствии клиента"
+    expect: ["V1900019680:20", "V1900019680:19", "V1900019680:31"]
+  # reported 2026-10-17: the rewrite guessed a counting rule; the procedure is п. 19 (identification first)
+  - q: "клиент заходит, садится на стул, достает купюры и сразу протягивает их кассиру"
+    expect: ["V1900019680:19"]
+holdout:
+  - q: "кассир оставляет клиента у окна и выходит из кабинки"
+    expect: ["V1900019680:22"]
+  - q: "teller steps out of the booth while the customer is still waiting"
+    expect: ["V1900019680:22"]
+  - q: "кассир кладет полученные от клиента купюры в ящик, не пересчитав их"
+    expect: ["V1900019680:20", "V1900019680:19"]
+  - q: "банкноты клиента пересчитываются уже после его ухода"
+    expect: ["V1900019680:20", "V1900019680:19"]
+  - q: "кассир отдает клиенту деньги, не пересчитав их при нем"
+    expect: ["V1900019680:31"]
+  - q: "на рабочем столе кассира остаются деньги предыдущего клиента, пока он обслуживает следующего"
+    expect: ["V1900019680:20"]
+  - q: "employee photographs documents with a phone at the cash desk"
+    expect: ["V1900019680:12"]
+  - q: "кассир фотографирует на телефон документы в кассе"
+    expect: ["V1900019680:12"]
+  - q: "у сотрудника в кассовом узле личный рюкзак"
+    expect: ["V1900019680:12"]
+  - q: "клиент проходит за стойку кассира"
+    expect: ["V1900018545:41", "V2000020075:8", "V2000020075:16", "V1900019680:75"]
+  - q: "a visitor walks into the cash room through the open door"
+    expect: ["V1900018545:41", "V2000020075:8", "V2000020075:16", "V1900019680:75"]
+  - q: "инкассатор передает сумку, кассир сразу ее вскрывает без осмотра пломбы"
+    expect: ["V1900019680:24", "V1900019680:107"]
+  - q: "the collection bag is torn and the cashier opens it after the collector has gone"
+    expect: ["V1900019680:25"]
+  - q: "кассир не использует аппарат для проверки подлинности банкнот при обмене валюты"
+    expect: ["V1900019680:36", "V1900019680:19", "V1900019680:57", "V1900019680:9", "V1900019680:41"]
+  - q: "один сотрудник упаковывает и пломбирует пачки банкнот без второго работника"
+    expect: ["V1900019680:42"]
+  - q: "посторонний заходит в хранилище денег без сопровождения ответственных лиц"
+    expect: ["V1900019680:75"]
+  - q: "ключ от сейфа кассира оставлен другому сотруднику"
+    expect: ["V1900019680:80", "V1900019680:76"]
+  - q: "сумка с деньгами передается инкассаторам в зале на глазах у клиентов"
+    expect: ["V2000020075:21"]
+
+# Queries that should return NO clause (relevance threshold, search.py / regs.md 5.5): off-topic,
+# banking topics outside the indexed acts, and harmless cash-desk scenes with no rule involved.
+# Written before any scores were looked at. Choose the threshold on `negatives` (with `queries`),
+# report it on `negatives_holdout` (with `holdout`).
+negatives:
+  - "какая завтра погода в Алматы"
+  - "рецепт плова на 6 человек"
+  - "who won the football match yesterday"
+  - "как поменять масло в автомобиле"
+  - "the cat is sleeping on the sofa"
+  - "посоветуй фильм на вечер"
+  - "how to learn python fast"
+  - "сколько стоит билет в Астану"
+  - "лучшие кофейни в центре города"
+  - "my laptop battery drains quickly"
+  - "какая ставка по ипотеке в этом году"
+  - "как открыть депозит через мобильное приложение"
+  - "клиент хочет взять потребительский кредит"
+  - "how do I reset my internet banking password"
+  - "банк повысил комиссию за перевод на карту другого банка"
+  - "кредитная история клиента испорчена просрочками"
+  - "customer disputes a card transaction made abroad"
+  - "сотрудник консультирует клиента по страхованию жизни"
+  - "банк выпускает облигации на бирже"
+  - "клиент жалуется на долгую загрузку приложения"
+  - "кассир улыбается и здоровается с клиентом"
+  - "клиент благодарит кассира и уходит"
+  - "кассир поправляет очки и смотрит в монитор"
+  - "the client is wearing a red jacket"
+  - "в зале ожидания играет тихая музыка"
+  - "у окна кассы стоит очередь из трех человек"
+  - "the cashier types something on the keyboard"
+  - "клиент заполняет анкету ручкой за столом в зале"
+  - "клиент смотрит в свой телефон, ожидая очереди"
+  - "кассир и клиент обсуждают погоду"
+negatives_holdout:
+  - "как приготовить борщ"
+  - "what time does the cinema open"
+  - "погода на выходные в Шымкенте"
+  - "how many planets are in the solar system"
+  - "где купить зимние шины"
+  - "посоветуй книгу по истории"
+  - "the train to Almaty is delayed"
+  - "как рефинансировать автокредит"
+  - "the bank changed its savings account interest rate"
+  - "клиент оформляет кредитную карту онлайн"
+  - "банк закрыл отделение в микрорайоне"
+  - "how to set up a recurring payment in the app"
+  - "сотрудник банка проходит обучение по продажам"
+  - "клиент спрашивает про курс акций банка"
+  - "кассир кивает клиенту и улыбается"
+  - "клиент держит в руках зонт"
+  - "the cashier adjusts her chair"
+  - "в очереди стоит пожилая женщина"
+  - "кассир смотрит на часы на стене"
+  - "клиент поправляет шарф у окна кассы"
+  - "the customer says goodbye and leaves the counter"

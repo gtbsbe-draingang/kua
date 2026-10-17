@@ -1,0 +1,96 @@
+# Milvus standalone (etcd + milvus, local object storage) and the RAG API. Secrets come from .env (see .env.example).
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes: [etcd:/etcd]
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.5.4
+    command: ["milvus", "run", "standalone"]
+    security_opt: ["seccomp:unconfined"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      # no MinIO (its images were removed from Docker Hub and quay); standalone Milvus keeps segments on its own volume
+      COMMON_STORAGETYPE: local
+    volumes: [milvus:/var/lib/milvus]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    depends_on: [etcd]
+    restart: unless-stopped
+
+  rag:
+    build: ./rag
+    env_file: .env
+    environment:
+      # regulation index (rag/regs, see regs.md). Build it once Milvus is up:
+      #   docker compose run --rm rag python -m regs build && docker compose run --rm rag python -m regs train-ltr
+      REGS_MILVUS_URI: http://milvus:19530
+      REGS_DATA_DIR: /data/regs
+      REGS_EMBED_BASE_URL: ${EMBED_BASE_URL}
+      REGS_EMBED_API_KEY: ${EMBED_API_KEY:-none}
+      REGS_EMBED_MODEL: ${EMBED_MODEL}
+      REGS_API_KEY: ${RAG_API_KEY}
+      # cross-encoder that reranks the hybrid pool in place of LambdaMART; empty = off
+      REGS_RERANK_MODEL: ${RERANK_MODEL-BAAI/bge-reranker-v2-m3}
+      HF_HOME: /hf
+    volumes:
+      - ./data/regs:/data/regs   # raw/ + parsed/ acts in; chunks, index meta and LambdaMART model out
+      - rerank_models:/hf        # reranker weights, downloaded on first use
+    ports: ["${RAG_PORT:-8080}:8080"]
+    # lets LLM_BASE_URL point at a model server on the host, e.g. http://host.docker.internal:30001/v1
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      milvus: {condition: service_healthy}
+    restart: unless-stopped
+
+  # --- Local models (off for now). Uncomment both services and the `hf` volume below,
+  # then point .env at them (see the "Local models" block in .env.example).
+  # Needs an NVIDIA GPU + nvidia-container-toolkit for the LLM.
+  #
+  # llm:   # Qwen3.5-9B, OpenAI-compatible at http://llm:30000/v1
+  #   image: lmsysorg/sglang:v0.5.21
+  #   command: >
+  #     python3 -m sglang.launch_server --model-path Qwen/Qwen3.5-9B
+  #     --host 0.0.0.0 --port 30000 --mem-fraction-static 0.17
+  #   environment:
+  #     HF_TOKEN: ${HF_TOKEN:-}
+  #   volumes: [hf:/root/.cache/huggingface]
+  #   shm_size: 16g
+  #   ipc: host
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:30000/health"]
+  #     interval: 30s
+  #     start_period: 600s
+  #   restart: unless-stopped
+  #
+  # embed:   # BAAI/bge-m3: multilingual incl. Kazakh + Russian, 1024-dim, OpenAI-compatible at http://embed:80/v1
+  #   image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4   # on GPU: hopper-1.9.4 (H100/H200) + the deploy block above
+  #   command: --model-id BAAI/bge-m3
+  #   volumes: [hf:/data]
+  #   restart: unless-stopped
+
+volumes:
+  etcd:
+  rerank_models:
+  milvus:
+  # hf:

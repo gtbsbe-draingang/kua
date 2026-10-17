@@ -1,0 +1,4 @@
+.env
+data/regs/chunks.jsonl
+data/regs/index_meta.json
+data/regs/ltr_lambdamart.*

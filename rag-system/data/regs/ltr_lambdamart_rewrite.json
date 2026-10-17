@@ -1,0 +1,59 @@
+{
+ "trained_at": "2026-10-17T13:32:21+0000",
+ "features": [
+  "cos",
+  "bm25",
+  "cos_rank",
+  "bm25_rank",
+  "cos_gap",
+  "bm25_rel",
+  "log_len"
+ ],
+ "monotone": [
+  1,
+  1,
+  -1,
+  -1,
+  1,
+  1,
+  0
+ ],
+ "params": {
+  "n_trees": 50,
+  "learning_rate": 0.1,
+  "max_leaf_nodes": 8,
+  "min_samples_leaf": 5,
+  "ndcg_at": 10
+ },
+ "cv_dev": {
+  "hit@1": 0.821,
+  "hit@3": 0.964,
+  "mrr": 0.877
+ },
+ "per_list": 60,
+ "folds": 5,
+ "train_queries": 28,
+ "rewrite": true,
+ "min_score": 1.0,
+ "threshold": {
+  "min_score": 1.0,
+  "useful": 0.929,
+  "precision": 0.471,
+  "empty": 0.036,
+  "avg_shown": 2.43,
+  "no_threshold": {
+   "useful": 0.964,
+   "precision": 0.264,
+   "empty": 0.0,
+   "avg_shown": 5.0
+  },
+  "rule": "max useful * precision with useful >= no-threshold - 0.1, out-of-fold dev"
+ },
+ "pool_recall_dev": 1.0,
+ "index": {
+  "built_at": "2026-10-17T10:32:02+0000",
+  "embed_model": "bge-m3",
+  "embed_dtype": "api"
+ },
+ "train_seconds": 125.4
+}
