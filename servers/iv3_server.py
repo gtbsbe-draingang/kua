@@ -6,8 +6,8 @@ GET  /healthz -> {"ok": true}. The port opens only after the model has loaded an
      answered a warm-up request, so a reachable /healthz means ready.
 POST /verify {"video_path": str, "prompt": str, "fps": 4}
      -> {"p_yes": float, "type_id": str, "observation": str, "raw": str, ...}
-     plus diagnostics: answer, yes_no_mass, frames, grid_thw, prompt_tokens,
-     timings. Any error -> HTTP 500 {"error": "..."}.
+     plus diagnostics: answer, yes_no_mass, frames, native_size, decoded_size,
+     grid_thw, prompt_tokens, timings. Any error -> HTTP 500 {"error": "..."}.
 
 How a request is answered:
 - Frames: PyAV decodes the file and keeps, for each time k/fps (k = 0, 1, ...)
@@ -19,8 +19,22 @@ How a request is answered:
   checks that video_grid_thw[0] == ceil(frames / 2) and that the prompt holds
   one <|vision_start|> per merged pair.
 - Resolution: video_processor.size exactly as the model's inference_demo.py sets
-  it, with min_pixels = max_pixels = 128*32*32 (a total pixel budget over all
-  frames, so short windows keep their native size).
+  it, with min_pixels = max_pixels = 128*32*32. longest_edge is a pixel budget
+  over all frames together (67,108,864), so short windows keep their native size.
+  When the budget forces the processor to scale frames down (long or large
+  input), PyAV decodes them straight to the size the processor would pick
+  itself (its own smart_resize: aspect kept, multiples of 32, never larger than
+  native) and the processor is told not to resize again. Otherwise frames are
+  decoded at native size and the processor resizes as usual (it only rounds to
+  its 32-pixel grid, or scales a tiny input up). Either way a request holds at
+  most about 3 x 67 MP of uint8 frames (about 200 MB) plus the processor's
+  float32 pixels, never one native frame per sample (a 1080p clip at 768
+  frames would be 4.8 GB).
+- Concurrency: at most IV3_SLOTS requests (default 2) are past decoding at any
+  time, i.e. decoding, preprocessing or holding inputs for the model; the rest
+  wait. One lock around the model: one request runs on the GPU while the next
+  one decodes and preprocesses. A request that has not reached the model within
+  IV3_LOCK_TIMEOUT seconds (default 300) fails with HTTP 500.
 - p_yes: the assistant turn is prefilled with "ANSWER:". At the next position,
   p_yes is the softmax over the logits of the YES and NO first tokens.
   YES/Yes/yes and NO/No/no, each with and without a leading space, are all
@@ -29,31 +43,37 @@ How a request is answered:
   six probabilities per side are summed:
       p_yes = sum(exp(logit[y]) for y in YES) / sum(exp(logit[t]) for t in YES + NO)
   yes_no_mass is the share of the full-vocabulary softmax on those twelve
-  tokens; a low value means the model did not answer in the format.
+  tokens; a low value means the model did not answer in the format. The logits
+  are those of the first generation step only, copied out by a logits processor
+  (greedy decoding adds no processor that changes them).
 - Then greedy decoding (do_sample=False) of up to 200 new tokens continues into
   "TYPE: <id>" and "OBSERVATION: <text>", parsed leniently. raw is "ANSWER:"
-  plus the generated text.
-- One lock around the model. Decoding and preprocessing run outside it, so they
-  overlap with another request on the GPU. A request that waits longer than
-  IV3_LOCK_TIMEOUT seconds (default 300) for the lock fails with HTTP 500.
+  plus the generated text. type_id is the model's word, lowercased; the server
+  does not check it against the rule catalogue. The caller validates it.
 """
 from __future__ import annotations
 
-import logging
-import math
 import os
-import re
-import threading
-import time
-from contextlib import asynccontextmanager
 
-import av
-import numpy as np
-import torch
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+# Before torch is imported: the pod's CPU quota is 16 cores, shared.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+
+import logging  # noqa: E402
+import math  # noqa: E402
+import re  # noqa: E402
+import sys  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402
+
+import av  # noqa: E402
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+from fastapi import FastAPI, Request  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+from transformers import LogitsProcessor, LogitsProcessorList  # noqa: E402
 
 REPO = os.environ.get("IV3_REPO", "yanziang/InternVideo3-8B-Instruct")
 MIN_PIXELS = MAX_PIXELS = 128 * 32 * 32  # inference_demo.py
@@ -61,6 +81,7 @@ VIDEO_SIZE = {"longest_edge": MAX_PIXELS * 512, "shortest_edge": MIN_PIXELS * 32
 MAX_NEW_TOKENS = 200
 MAX_FRAMES = int(os.environ.get("IV3_MAX_FRAMES", "768"))  # the video processor's own max_frames
 LOCK_TIMEOUT = float(os.environ.get("IV3_LOCK_TIMEOUT", "300"))
+SLOTS = threading.BoundedSemaphore(int(os.environ.get("IV3_SLOTS", "2")))
 PREFILL = "ANSWER:"
 YES = ("YES", " YES", "Yes", " Yes", "yes", " yes")
 NO = ("NO", " NO", "No", " No", "no", " no")
@@ -75,24 +96,51 @@ STATE: dict = {}
 
 # ---------------------------------------------------------------- frames
 
+def processor_target(n: int, height: int, width: int) -> tuple[int, int] | None:
+    """The (height, width) the video processor would give n native frames when
+    its pixel budget forces it to scale them down; None when it would not."""
+    vp = STATE["processor"].video_processor
+    tf, f = vp.temporal_patch_size, vp.patch_size * vp.merge_size
+    n = max(n, tf)
+    # the processor's own test (smart_resize): budget exceeded on its rounded grid
+    t_bar = round(n / tf) * tf
+    if t_bar * (round(height / f) * f) * (round(width / f) * f) <= VIDEO_SIZE["longest_edge"]:
+        return None
+    return STATE["smart_resize"](num_frames=n, height=height, width=width, temporal_factor=tf, factor=f,
+                                 min_pixels=VIDEO_SIZE["shortest_edge"], max_pixels=VIDEO_SIZE["longest_edge"])
+
+
 def decode_frames(path: str, fps: float) -> tuple[np.ndarray, dict]:
     """Frames nearest to t = k/fps (k = 0, 1, ...) for every t inside the video.
 
     Returns (frames as uint8 [T, H, W, 3], info) where info has the source fps,
     the source frame index and presentation time of each kept frame, the number
-    of decoded frames and the video's duration (end of its last frame).
+    of decoded frames, the video's duration (end of its last frame), the native
+    and decoded frame sizes, and do_resize for the processor. Frames are decoded
+    straight to the processor's target size when its pixel budget would scale
+    them down (planned from the header's duration, checked against the real
+    frame count afterwards), and land in one preallocated array.
     """
     if not os.path.isfile(path):
         raise FileNotFoundError(f"no such file: {path}")
-    frames: list[np.ndarray] = []
     indices: list[int] = []
     times: list[float] = []
+    buf: np.ndarray | None = None
+    count = 0
+    native = plan = None  # native (h, w); decode size when the processor would scale down
+    convert: dict = {}
     with av.open(path) as container:
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
         stream.thread_count = 2
         rate = stream.average_rate or stream.guessed_rate or stream.base_rate
         src_fps = float(rate) if rate else None
+        if stream.duration is not None:
+            header_s = float(stream.duration * stream.time_base)
+        else:
+            header_s = container.duration / 1e6 if container.duration else 0.0
+        # frames this request will keep; unknown duration plans for the worst case
+        n_plan = min(MAX_FRAMES, max(1, math.ceil(header_s * fps))) if header_s > 0 else MAX_FRAMES
         prev = None
         prev_t = prev_i = 0
         origin = None
@@ -100,9 +148,26 @@ def decode_frames(path: str, fps: float) -> tuple[np.ndarray, dict]:
         end = 0.0
 
         def keep(frame, t, i):
-            if len(frames) >= MAX_FRAMES:
+            nonlocal buf, count, native, plan, convert
+            if count >= MAX_FRAMES:
                 raise ValueError(f"more than {MAX_FRAMES} frames at {fps} fps: send a shorter window")
-            frames.append(frame.to_ndarray(format="rgb24"))
+            if buf is None:
+                native = (frame.height, frame.width)
+                plan = processor_target(n_plan, *native)
+                convert = dict(format="rgb24")
+                if plan is not None:
+                    convert.update(height=plan[0], width=plan[1], interpolation="BICUBIC")
+                h, w = plan or native
+                buf = np.empty((min(MAX_FRAMES, n_plan + 2), h, w, 3), dtype=np.uint8)
+            elif count == len(buf):  # the header understated the duration
+                grown = np.empty((min(MAX_FRAMES, 2 * len(buf)), *buf.shape[1:]), dtype=np.uint8)
+                grown[:count] = buf[:count]
+                buf = grown
+            arr = frame.to_ndarray(**convert)
+            if arr.shape != buf.shape[1:]:
+                raise ValueError(f"frame size changed mid-stream: {arr.shape[:2]} after {buf.shape[1:3]}")
+            buf[count] = arr
+            count += 1
             indices.append(i)
             times.append(t)
 
@@ -137,9 +202,12 @@ def decode_frames(path: str, fps: float) -> tuple[np.ndarray, dict]:
     if src_fps is None:
         src_fps = n / end if end > 0 else fps
     drift = max(abs(i / src_fps - t) for i, t in zip(indices, times))
+    # Frames already at the processor's target for the real count need no second
+    # resize. If the plan missed (wrong header), the processor resizes as usual.
+    do_resize = plan is None or processor_target(count, *native) != plan
     info = dict(src_fps=src_fps, indices=indices, times=times, decoded=n, duration=end,
-                skipped=skipped, drift=drift)
-    return np.stack(frames), info
+                skipped=skipped, drift=drift, native=native, size=buf.shape[1:3], do_resize=do_resize)
+    return buf[:count], info
 
 
 # ---------------------------------------------------------------- model
@@ -172,7 +240,10 @@ def load() -> None:
     yes_ids, no_ids = single_tokens(YES), single_tokens(NO)
     if set(yes_ids) & set(no_ids):
         raise RuntimeError("YES and NO variants share a token")
-    STATE.update(model=model, processor=processor, tok=tok, path=path,
+    vp = processor.video_processor
+    # the resize rule of the video processor class actually loaded (Qwen3VLVideoProcessor)
+    smart_resize = getattr(sys.modules[type(vp).__module__], "smart_resize")
+    STATE.update(model=model, processor=processor, tok=tok, path=path, smart_resize=smart_resize,
                  yes=torch.tensor(yes_ids), no=torch.tensor(no_ids),
                  vision_start=tok.convert_tokens_to_ids("<|vision_start|>"))
     torch.cuda.synchronize()
@@ -193,8 +264,8 @@ def build_inputs(frames: np.ndarray, info: dict, prompt: str):
     meta = VideoMetadata(total_num_frames=info["decoded"], fps=info["src_fps"], width=w, height=h,
                          duration=info["duration"], video_backend="pyav",
                          frames_indices=list(info["indices"]))
-    inputs = processor(text=[text], videos=[frames], video_metadata=[meta],
-                       do_sample_frames=False, return_tensors="pt")
+    inputs = processor(text=[text], videos=[frames], video_metadata=[meta], do_sample_frames=False,
+                       do_resize=info.get("do_resize", True), return_tensors="pt")
     grid = inputs["video_grid_thw"][0].tolist()
     if grid[0] != math.ceil(n / 2):
         raise RuntimeError(f"processor re-sampled the frames: {n} frames, video_grid_thw {grid}")
@@ -226,20 +297,37 @@ def parse(raw: str) -> tuple[str, str, str]:
     return answer, type_id, observation
 
 
+class FirstStepLogits(LogitsProcessor):
+    """Copies the first generation step's scores to the CPU and passes them on.
+    With greedy decoding and no penalties, these are the raw float32 logits of
+    the token after the prompt (generate adds no processor that changes them)."""
+
+    def __init__(self):
+        self.logits: torch.Tensor | None = None
+
+    def __call__(self, input_ids, scores):
+        if self.logits is None:
+            self.logits = scores[0].detach().float().cpu()
+        return scores
+
+
 def run_model(inputs, max_new_tokens: int = MAX_NEW_TOKENS) -> dict:
     model, tok = STATE["model"], STATE["tok"]
     inputs = inputs.to(model.device)
     prompt_tokens = int(inputs["input_ids"].shape[1])
+    capture = FirstStepLogits()
     try:
         with torch.inference_mode():
             out = model.generate(
                 **inputs, max_new_tokens=max_new_tokens, do_sample=False,
                 temperature=None, top_p=None, top_k=None,
-                output_logits=True, return_dict_in_generate=True,
+                logits_processor=LogitsProcessorList([capture]),
             )
-        first = out.logits[0][0].float().cpu()  # raw logits of the first new token
-        new_ids = out.sequences[0, prompt_tokens:].cpu()
+        new_ids = out[0, prompt_tokens:].cpu()
         del out
+        first = capture.logits
+        if first is None:
+            raise RuntimeError("generate produced no step")
     finally:
         del inputs
         torch.cuda.empty_cache()  # the GPU is shared: give back what this request cached
@@ -307,34 +395,47 @@ def verify(req: VerifyRequest):
             raise ValueError(f"fps must be in (0, 30], got {req.fps}")
         if not req.prompt.strip():
             raise ValueError("empty prompt")
-        frames, info = decode_frames(req.video_path, req.fps)
-        t1 = time.perf_counter()
-        inputs, grid = build_inputs(frames, info, req.prompt)
-        t2 = time.perf_counter()
-        if not LOCK.acquire(timeout=LOCK_TIMEOUT):
-            raise TimeoutError(f"the model stayed busy for {LOCK_TIMEOUT:.0f} s")
+        deadline = t0 + LOCK_TIMEOUT
+        if not SLOTS.acquire(timeout=LOCK_TIMEOUT):
+            raise TimeoutError(f"no free slot for {LOCK_TIMEOUT:.0f} s (other requests in progress)")
         try:
+            t1 = time.perf_counter()
+            frames, info = decode_frames(req.video_path, req.fps)
+            n_frames = len(frames)
+            t2 = time.perf_counter()
+            inputs, grid = build_inputs(frames, info, req.prompt)
+            del frames
             t3 = time.perf_counter()
-            out = run_model(inputs)
+            if not LOCK.acquire(timeout=max(0.0, deadline - t3)):
+                raise TimeoutError(f"the model stayed busy for {LOCK_TIMEOUT:.0f} s")
+            try:
+                t4 = time.perf_counter()
+                out = run_model(inputs)
+            finally:
+                LOCK.release()
+            del inputs
+            t5 = time.perf_counter()
         finally:
-            LOCK.release()
-        t4 = time.perf_counter()
+            SLOTS.release()
     except Exception as exc:  # noqa: BLE001 - every failure becomes a JSON 500
         if isinstance(exc, torch.cuda.OutOfMemoryError):
             torch.cuda.empty_cache()
         log.exception("verify failed for %s", req.video_path)
         return error(f"{type(exc).__name__}: {exc}")
     answer, type_id, observation = parse(out["raw"])
-    timings = dict(decode=t1 - t0, preprocess=t2 - t1, wait=t3 - t2, model=t4 - t3, total=t4 - t0)
-    log.info("verify %s | %d frames (grid %s, drift %.3f s) | %d prompt + %d new tokens | "
-             "p_yes %.4f answer %s type %s | yes_no_mass %.3f top5 %s | %s",
-             os.path.basename(req.video_path), len(frames), grid, info["drift"],
+    timings = dict(slot_wait=t1 - t0, decode=t2 - t1, preprocess=t3 - t2, wait=t4 - t3, model=t5 - t4,
+                   total=t5 - t0)
+    log.info("verify %s | %d frames %sx%s -> decoded %sx%s, processor resize %s (grid %s, drift %.3f s) | "
+             "%d prompt + %d new tokens | p_yes %.4f answer %s type %s | yes_no_mass %.3f top5 %s | %s",
+             os.path.basename(req.video_path), n_frames, info["native"][1], info["native"][0],
+             info["size"][1], info["size"][0], info["do_resize"], grid, info["drift"],
              out["prompt_tokens"], out["new_tokens"], out["p_yes"], answer or "-", type_id or "-",
              out["yes_no_mass"], out["top5"],
              " ".join(f"{k} {v:.2f}s" for k, v in timings.items()))
     return {
         "p_yes": out["p_yes"], "type_id": type_id, "observation": observation, "raw": out["raw"],
-        "answer": answer, "yes_no_mass": out["yes_no_mass"], "frames": len(frames),
+        "answer": answer, "yes_no_mass": out["yes_no_mass"], "frames": n_frames,
+        "native_size": list(info["native"]), "decoded_size": list(info["size"]),
         "grid_thw": grid, "prompt_tokens": out["prompt_tokens"],
         "timings": {k: round(v, 3) for k, v in timings.items()},
     }

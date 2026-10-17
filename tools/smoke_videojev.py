@@ -27,17 +27,21 @@ memory can be measured.
 """
 from __future__ import annotations
 
-import argparse
-import json
-import math
 import os
-import sys
-import time
-import unicodedata
-from pathlib import Path
 
-import numpy as np
-import torch
+# Before torch is imported: the pod's CPU quota is 16 cores, shared.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import math  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+import unicodedata  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
 
 REPO = "ZhuYuhan/VideoJev-4B"
 CONTEXT = 147456      # the model card's grounding setting
