@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# The judge LLM: Qwen3.5-9B on SGLang, an OpenAI-style server on 127.0.0.1:30005 for the RAG server
+# (RAG_LLM_KIND=openai, RAG_LLM_URL=http://127.0.0.1:30005/v1/chat/completions, model qwen3.5-9b).
+# Runs from env/vlm, offline, with every cache inside the root (env.sh).
+#
+#   bash judge_llm.sh start    refuse when under 35 GiB of GPU memory is free; else start the server in
+#                              the background and return once its process is up. Loading the weights and
+#                              capturing CUDA graphs takes minutes: poll `status`.
+#   bash judge_llm.sh status   pid and GET /health. Exit 0 healthy, 3 running but not ready, 1 not running.
+#   bash judge_llm.sh stop     TERM the server named in logs/judge_llm.pid (after checking that the process
+#                              is sglang on port 30005), KILL after 60 s; then any process left in its
+#                              session is killed too.
+#
+# Log: logs/judge_llm.log (appended). Pid: logs/judge_llm.pid.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
+MTA_ROOT=/home/jovyan/model_train_amir
+# shellcheck source=/dev/null
+source "$MTA_ROOT/env.sh"
+
+PORT=30005
+MODEL_PATH=Qwen/Qwen3.5-9B
+SERVED_NAME=qwen3.5-9b
+MIN_FREE_MIB=$((35 * 1024))
+
+PY=$MTA_ROOT/env/vlm/bin/python
+LOG=$MTA_ROOT/logs/judge_llm.log
+PIDFILE=$MTA_ROOT/logs/judge_llm.pid
+CTL=$MTA_ROOT/logs/judge_llm.lock   # serialises start and stop (fd 8)
+
+usage() { sed -n '2,/^set -euo pipefail/{/^#/s/^# \{0,1\}//p;}' "$SELF"; }
+die() { echo "judge_llm.sh: $*" >&2; exit 1; }
+
+# The pid in the pid file, if that process is alive and really is our server (pids get reused).
+server_pid() {
+  local pid cmd
+  [ -s "$PIDFILE" ] || return 1
+  pid=$(<"$PIDFILE")
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline")
+  grep -qF 'sglang.launch_server' <<<"$cmd" && grep -qF -e "--port $PORT " <<<"$cmd" || return 1
+  echo "$pid"
+}
+
+# True while pid runs (a zombie, which nothing may have reaped, does not).
+alive() {
+  local state
+  state=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -c1) || return 1
+  [ -n "$state" ] && [ "$state" != Z ]
+}
+
+gpu_free_mib() {
+  local free
+  free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | sed -n 1p | tr -d ' ')
+  [[ $free =~ ^[0-9]+$ ]] || return 1
+  echo "$free"
+}
+
+ctl_lock() {
+  exec 8>"$CTL"
+  flock -w 120 8 || die "another start or stop has been running for 2 minutes"
+}
+
+start() {
+  local pid free
+  ctl_lock
+  if pid=$(server_pid); then
+    echo "already running (pid $pid)"
+    return
+  fi
+  [ -x "$PY" ] || die "no env/vlm: $PY"
+  free=$(gpu_free_mib) || die "cannot read the free GPU memory from nvidia-smi"
+  [ "$free" -ge "$MIN_FREE_MIB" ] || die "only $free MiB of GPU memory is free, need $MIN_FREE_MIB"
+  mkdir -p "$(dirname "$LOG")"
+  echo "[$(date -u '+%F %T')] start judge llm ($free MiB of GPU memory free)" >>"$LOG"
+  # setsid: its own session, so stop can find every process it spawned. 8>&-: the server must not keep the lock.
+  OMP_NUM_THREADS=4 setsid nohup "$PY" -m sglang.launch_server \
+    --model-path "$MODEL_PATH" --served-model-name "$SERVED_NAME" \
+    --host 127.0.0.1 --port "$PORT" \
+    --mem-fraction-static 0.2 --context-length 32768 \
+    >>"$LOG" 2>&1 </dev/null 8>&- &
+  pid=$!
+  echo "$pid" >"$PIDFILE"
+  sleep 3
+  server_pid >/dev/null || die "the server did not stay up (see $LOG)"
+  echo "started (pid $pid); log $LOG; poll: bash $SELF status"
+}
+
+# Processes still in the session of the server we started (its scheduler and helper processes), as long as
+# they run a binary from inside the root.
+session_leftovers() {
+  local pid=$1 p
+  for p in $(pgrep -g "$pid" || true); do
+    case "$(readlink "/proc/$p/exe" 2>/dev/null || true)" in
+      "$MTA_ROOT"/*) echo "$p" ;;
+    esac
+  done
+}
+
+stop() {
+  local pid p
+  ctl_lock
+  if ! pid=$(server_pid); then
+    rm -f "$PIDFILE"
+    echo "not running"
+    return
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 60); do
+    alive "$pid" || break
+    sleep 1
+  done
+  if alive "$pid"; then
+    echo "pid $pid ignored TERM for 60 s: KILL"
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  sleep 1
+  for p in $(session_leftovers "$pid"); do
+    echo "killing leftover pid $p of the server's session"
+    kill -KILL "$p" 2>/dev/null || true
+  done
+  rm -f "$PIDFILE"
+  echo "stopped"
+}
+
+status() {
+  local pid
+  if ! pid=$(server_pid); then
+    echo "not running"
+    return 1
+  fi
+  if curl -fsS --noproxy '*' -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    echo "running (pid $pid), healthy"
+    return 0
+  fi
+  echo "running (pid $pid), not ready yet (GET /health fails); log tail:"
+  tail -n 3 "$LOG" | cut -c1-300
+  return 3
+}
+
+case "${1:-}" in
+  start|stop|status) "$1" ;;
+  -h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
