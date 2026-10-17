@@ -16,6 +16,8 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest"]
+# measurement only, on the Mac (tools/rag_eval.py --backend sonnet); never installed into the pod envs
+cloud-dev = ["anthropic"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

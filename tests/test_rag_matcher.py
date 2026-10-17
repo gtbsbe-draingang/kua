@@ -137,6 +137,17 @@ def test_fit_clauses_drops_retrieved_clauses_from_the_end():
     assert matcher.fit_clauses("obs", cands, catalogue) == catalogue
 
 
+def test_judge_prompt_is_the_servers_sequence():
+    big = [clause(f"D:{i}", "x " * 600) for i in range(30)]
+    index = FakeIndex([B9, A1, A2, B7, *big])
+    cands = [cand("r_safe", "Сейф закрывается на ключ.")]
+    hits = [Hit(c.id, 0.5, 0) for c in big]
+    system, user, offered = matcher.judge_prompt("obs", cands, hits, index)
+    expect = matcher.fit_clauses("obs", cands, matcher.clause_candidates(hits, cands, index))
+    assert offered == expect and 0 < len(offered) < 31 and offered[0][1] is None
+    assert (system, user) == matcher.build_prompt("obs", cands, expect)
+
+
 # ---- parse_answer -------------------------------------------------------------------------
 
 RULES = ["cash_unattended", "other"]

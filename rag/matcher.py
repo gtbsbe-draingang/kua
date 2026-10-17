@@ -93,6 +93,16 @@ def fit_clauses(observation: str, candidates: list[dict], clauses: list[tuple[Cl
     return out
 
 
+def judge_prompt(observation: str, candidates: list[dict], hits: list[Hit],
+                 index) -> tuple[str, str, list[tuple[Clause, int | None]]]:
+    """What the matcher sends the LLM for one judge request: clause_candidates over the retrieval hits and the
+    candidates' catalogue quotes, fit_clauses to the /generate limit, then build_prompt. Returns (system, user,
+    the clauses offered). The RAG server and tools/rag_eval.py both call this, so their prompts cannot drift."""
+    clauses = fit_clauses(observation, candidates, clause_candidates(hits, candidates, index))
+    system, user = build_prompt(observation, candidates, clauses)
+    return system, user, clauses
+
+
 def _first_object(text: str) -> dict | None:
     """The first JSON object in text (surrounding prose or a ```json fence allowed)."""
     decoder = json.JSONDecoder()

@@ -14,6 +14,7 @@ import threading
 import httpx
 
 from pipeline import replicas
+from pipeline.prompts_zh import MULTI_TEMPLATE_ZH, VERIFY_PROMPTS_ZH
 from pipeline.types import Frame
 
 log = logging.getLogger(__name__)
@@ -123,12 +124,22 @@ def verify_prompt(rules: list[dict]) -> str:
     return VERIFY_TEMPLATE.format(rules=lines, guidance=GUIDANCE, observation=OBSERVATION)
 
 
-def multi_prompt(rules: list[dict]) -> str:
-    """Every rule's verify_prompt as question k = 1, 2, ..., answered on a line "<k>. YES" or "<k>. NO"."""
+def multi_prompt(rules: list[dict], lang: str = "en") -> str:
+    """Every rule's verify_prompt as question k = 1, 2, ..., answered on a line "<k>. YES" or "<k>. NO".
+    lang "zh": the Chinese template and each rule's Chinese question (prompts_zh; the English verify_prompt for
+    an id it lacks), with the same answer lines and a Russian observation."""
     n = len(rules)
-    return MULTI_TEMPLATE.format(
+    if lang == "zh":
+        template = MULTI_TEMPLATE_ZH
+        questions = [" ".join(VERIFY_PROMPTS_ZH[str(r["id"])].split()) if str(r.get("id")) in VERIFY_PROMPTS_ZH
+                     else _question(r) for r in rules]
+    elif lang == "en":
+        template, questions = MULTI_TEMPLATE, [_question(r) for r in rules]
+    else:
+        raise ValueError(f"unknown prompt language {lang!r}")
+    return template.format(
         n=n, lines=n + 1, guidance=GUIDANCE, observation=OBSERVATION,
-        questions="\n".join(f"{k}. {_question(r)}" for k, r in enumerate(rules, 1)),
+        questions="\n".join(f"{k}. {q}" for k, q in enumerate(questions, 1)),
         answers="\n".join(f"{k}. YES or {k}. NO" for k in range(1, n + 1)))
 
 
@@ -158,14 +169,15 @@ def verify(window_path, rules: list[dict], timeout: float) -> tuple[float | None
         return None, "", ""
 
 
-def verify_multi(window_path, rules: list[dict], timeout: float) -> tuple[list[float | None], str]:
-    """One POST asks every rule (multi_prompt): (P(YES) per rule, aligned with rules; OBSERVATION).
+def verify_multi(window_path, rules: list[dict], timeout: float,
+                 lang: str = "en") -> tuple[list[float | None], str]:
+    """One POST asks every rule (multi_prompt in lang): (P(YES) per rule, aligned with rules; OBSERVATION).
     An entry that is not a probability is None for its rule. ([None] * len(rules), "") on any other
     failure, including a p_yes_list of the wrong length."""
     try:
         if not rules or not timeout or timeout <= 0:
             return [None] * len(rules), ""
-        body = {"video_path": os.path.abspath(str(window_path)), "prompt": multi_prompt(rules),
+        body = {"video_path": os.path.abspath(str(window_path)), "prompt": multi_prompt(rules, lang),
                 "fps": VERIFY_FPS, "n_answers": len(rules)}
         r = _post_iv3(body, timeout)
         if r.status_code != 200:

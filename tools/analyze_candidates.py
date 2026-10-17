@@ -37,6 +37,7 @@ named in --export) and prints the tables used in the report.
 from __future__ import annotations
 
 import argparse
+import bisect
 import itertools
 import json
 import math
@@ -193,13 +194,15 @@ def nms_time(cands: list[dict], sec: float, top_k: int) -> list[dict]:
 
 
 def auc(pos: list[float], neg: list[float]) -> float | None:
-    """P(pos > neg) + P(pos == neg) / 2 over all pairs; None when a side is empty. -inf is allowed."""
+    """P(pos > neg) + P(pos == neg) / 2 over all pairs; None when a side is empty. -inf is allowed.
+    Counted per positive by bisection in the sorted negatives (the shuffle nulls call it thousands of times)."""
     if not pos or not neg:
         return None
+    srt = sorted(neg)
     s = 0.0
     for a in pos:
-        for b in neg:
-            s += 1.0 if a > b else 0.5 if a == b else 0.0
+        lo, hi = bisect.bisect_left(srt, a), bisect.bisect_right(srt, a)
+        s += lo + 0.5 * (hi - lo)
     return s / (len(pos) * len(neg))
 
 
