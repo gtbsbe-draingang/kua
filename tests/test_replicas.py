@@ -102,7 +102,6 @@ def test_verify_fails_over_on_connect_error(monkeypatch):
     seen = fake_post(monkeypatch, handler)
     assert clients.verify("w.mp4", RULES, 10) == (0.7, "none", "ok")
     assert seen == [A, B]
-    assert clients.verify_multi("w.mp4", RULES, 10)[0] in ([None], [0.7])  # never raises
 
 
 def test_verify_multi_fails_over_on_connect_error(monkeypatch):
