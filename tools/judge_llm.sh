@@ -13,8 +13,9 @@
 #                              plus about 10 GiB for the KV cache and the recurrent-state slots.
 #   bash judge_llm.sh status   pid and GET /health. Exit 0 healthy, 3 running but not ready, 1 not running.
 #   bash judge_llm.sh stop     TERM the server named in logs/judge_llm.pid (after checking that the process
-#                              is sglang on port 30005), KILL after 60 s; then any live process left in
-#                              its session (a scheduler orphaned by a crash) is killed too.
+#                              is sglang on port 30005), KILL after 60 s; then any live "sglang" process
+#                              left in its session (a scheduler orphaned by a crash) is killed too. A pid
+#                              file naming some other live process is removed and that process left alone.
 #
 # Log: logs/judge_llm.log (appended). Pid: logs/judge_llm.pid.
 set -euo pipefail
@@ -32,6 +33,7 @@ MIN_FREE_MIB=$((35 * 1024))
 STATIC_MIB=$((28 * 1024))   # weights + KV cache + recurrent-state pool; see the header
 
 PY=$MTA_ROOT/env/vlm/bin/python
+PRELOAD_LIBS=("$MTA_ROOT/env/toolchain/lib/libgcc_s.so.1" "$MTA_ROOT/env/toolchain/lib/libstdc++.so.6")
 LOG=$MTA_ROOT/logs/judge_llm.log
 PIDFILE=$MTA_ROOT/logs/judge_llm.pid
 CTL=$MTA_ROOT/logs/judge_llm.lock   # serialises start and stop (fd 8)
@@ -71,16 +73,22 @@ ctl_lock() {
 }
 
 start() {
-  local pid free fraction
+  local pid free fraction lib
   ctl_lock
   if pid=$(server_pid); then
     echo "already running (pid $pid)"
     return
   fi
   [ -x "$PY" ] || die "no env/vlm: $PY"
+  for lib in "${PRELOAD_LIBS[@]}"; do
+    [ -r "$lib" ] || die "missing $lib (the toolchain; bash setup.sh toolchain)"
+  done
   free=$(gpu_free_mib) || die "cannot read the free GPU memory from nvidia-smi"
   [ "$free" -ge "$MIN_FREE_MIB" ] || die "only $free MiB of GPU memory is free, need $MIN_FREE_MIB"
-  fraction=$(awk -v pool="$STATIC_MIB" -v free="$free" 'BEGIN { printf "%.3f", pool / free }')
+  # SGLang re-reads the free memory a moment later (and sees ~0.5 GiB less: its own CUDA context, plus whatever
+  # the other processes moved meanwhile), so the pool lands within about 1% of 28 GiB, not exactly on it.
+  # LC_ALL=C: the decimal point must be a point, whatever the locale.
+  fraction=$(LC_ALL=C awk -v pool="$STATIC_MIB" -v free="$free" 'BEGIN { printf "%.3f", pool / free }')
   mkdir -p "$(dirname "$LOG")"
   echo "[$(date -u '+%F %T')] start judge llm ($free MiB of GPU memory free, --mem-fraction-static $fraction)" >>"$LOG"
   # setsid: its own session, so stop can find every process it spawned. 8>&-: the server must not keep the lock.
@@ -89,7 +97,7 @@ start() {
   # than the pod's. A preload of just the two runtime libraries, not LD_LIBRARY_PATH: the toolchain's lib dir also
   # holds a libcudart 12.8 that would shadow the one torch uses.
   PATH="$MTA_ROOT/env/vlm/bin:$PATH" OMP_NUM_THREADS=4 \
-    LD_PRELOAD="$MTA_ROOT/env/toolchain/lib/libgcc_s.so.1:$MTA_ROOT/env/toolchain/lib/libstdc++.so.6" \
+    LD_PRELOAD="$(IFS=:; echo "${PRELOAD_LIBS[*]}")" \
     setsid nohup "$PY" -m sglang.launch_server \
     --model-path "$MODEL_PATH" --served-model-name "$SERVED_NAME" \
     --host 127.0.0.1 --port "$PORT" \
@@ -102,22 +110,23 @@ start() {
   echo "started (pid $pid); log $LOG; poll: bash $SELF status"
 }
 
-# Live processes in the session we started (its scheduler and helper processes) that run a binary from inside
-# the root. Zombies have no binary and are skipped.
+# Live processes in the session led by pid (the server's scheduler and helpers) that are ours to kill: a binary
+# from inside the root and "sglang" in the command line (the scheduler and detokenizer rename themselves
+# "sglang::..."). Zombies have no binary and are skipped.
 session_leftovers() {
   local sid=$1 p
   for p in $(pgrep -s "$sid" || true); do
     case "$(readlink "/proc/$p/exe" 2>/dev/null || true)" in
-      "$MTA_ROOT"/*) echo "$p" ;;
+      "$MTA_ROOT"/*) tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | grep -qF 'sglang' && echo "$p" || true ;;
     esac
   done
 }
 
 stop() {
-  local pid='' p note=''
+  local pid='' p sweep=0 note=''
   ctl_lock
   if [ -s "$PIDFILE" ]; then pid=$(<"$PIDFILE"); fi
-  [[ $pid =~ ^[0-9]+$ ]] || pid=''
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || pid=''   # never 0: pgrep -s 0 means the caller's own session
   if [ -n "$pid" ] && server_pid >/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     for _ in $(seq 60); do
@@ -129,11 +138,16 @@ stop() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
     sleep 1
-  else
+    sweep=1
+  elif [ -n "$pid" ] && ! alive "$pid"; then
+    # our server is gone (crashed, or the pod restarted); what it left in its session may still hold GPU memory
     note=" (no server process was running)"
+    sweep=1
+  else
+    # no pid, or the pid file's number now belongs to another process: not ours, so nothing is killed
+    note=" (no server process was running${pid:+; pid $pid in the pid file is not the server, left alone})"
   fi
-  # a crashed or killed server can leave its scheduler behind, holding GPU memory
-  if [ -n "$pid" ]; then
+  if [ "$sweep" = 1 ]; then
     for p in $(session_leftovers "$pid"); do
       echo "killing leftover pid $p of the server's session"
       kill -KILL "$p" 2>/dev/null || true
