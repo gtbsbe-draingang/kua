@@ -670,10 +670,10 @@ def test_thresholds_strong_null_cells_keys_and_rejections(tmp_path):
 
 
 def test_committed_thresholds_use_grid_without_strong():
-    # top_k 8 checks every cell of a clip up to 32 s; zoom and the per-rule check stay off until measured
+    # top_k 16 checks every cell of a clip up to 64 s with 4 replicas; zoom and the per-rule check stay off because the window measurement showed no gain
     assert real._load_thresholds(ROOT / "thresholds.json") == {
         "generator": "grid", "cell_sec": 4.0, "rank": "logit", "cand": 0.25, "verify": 0.05, "strong": None,
-        "fallback": 0.5, "top_k": 8, "merge_sec": 3, "anchor": "center", "anchor_offset_sec": 0,
+        "fallback": 0.5, "top_k": 16, "merge_sec": 3, "anchor": "center", "anchor_offset_sec": 0,
         "zoom": False, "verify_mode": "single"}
 
 
