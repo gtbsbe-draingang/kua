@@ -12,7 +12,16 @@ Candidates come from one of two generators, chosen by `generator` in thresholds.
   evenly over the clip are checked instead, and InternVideo3 alone decides.
 - "segments" (the original design): runs of a rule's grounding score >= cand, merged across rules.
 
-`ground`, `choose`, `verify` and `judge` are the module-level wrappers the tests mock.
+Two switches in thresholds.json change how each window is checked; both are off when a file leaves them out:
+- `zoom`: each window is cut cropped to the people in it (zoom.person_box on the upright copy). No person, a
+  failed detector or too little time left gives the full frame.
+- `verify_mode`: "single" asks one YES/NO question listing every rule (clients.verify); "multi" asks one per
+  rule but `other` in the same call (clients.verify_multi): p_yes is the highest answer, and its rule, when it
+  reaches `verify`, is the check's type.
+The judge (clients.judge_answer) may also give a corpus citation for its rule, which then replaces the rule's
+catalogue citation in the result.
+
+`ground`, `choose`, `verify`, `verify_multi` and `judge_answer` are the module-level wrappers the tests mock.
 """
 from __future__ import annotations
 
@@ -34,7 +43,7 @@ from pathlib import Path
 
 import yaml
 
-from pipeline import clients, frames, videojev
+from pipeline import clients, frames, videojev, zoom
 from pipeline.logic import (accept_judge, cells, even_cells, judge_candidates, keep_decision, merge_events_indexed,
                             pair_timeline, pick_timecode, rank_curve, sample_times, segments, top_candidates,
                             top_cells)
@@ -62,6 +71,8 @@ NORMALIZE_MAX_SEC, NORMALIZE_MIN_SEC = 120.0, 5.0
 TH_KEYS = ("generator", "cand", "verify", "strong", "fallback", "top_k", "merge_sec", "anchor",
            "anchor_offset_sec")
 CELLS_KEYS = ("cell_sec", "rank")  # required by the cells generator
+TH_DEFAULTS = {"zoom": False, "verify_mode": "single"}  # the switches, as a file without them runs
+VERIFY_MODES = ("single", "multi")
 GENERATORS = ("cells", "segments")
 RANKS = ("logit",)
 ANCHORS = ("peak", "onset", "center")  # cells always use the centre; segments take peak or onset
@@ -100,9 +111,12 @@ def verify(window_path: str, rules: list[dict], timeout: float) -> tuple[float |
     return clients.verify(window_path, rules, timeout)
 
 
-def judge(observation: str, evidence: list[Frame], candidates: list[dict],
-          timeout: float) -> tuple[str | None, str, float | None]:
-    return clients.judge(observation, evidence, candidates, timeout)
+def verify_multi(window_path: str, rules: list[dict], timeout: float) -> tuple[list[float | None], str]:
+    return clients.verify_multi(window_path, rules, timeout)
+
+
+def judge_answer(observation: str, evidence: list[Frame], candidates: list[dict], timeout: float) -> dict | None:
+    return clients.judge_answer(observation, evidence, candidates, timeout)
 
 
 # ---- configuration, loaded once ------------------------------------------------------------------
@@ -131,6 +145,7 @@ def _load_thresholds(path: Path) -> dict:
     th = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(th, dict):
         raise ValueError(f"{path}: thresholds must be a JSON object")
+    th = {**TH_DEFAULTS, **th}
     missing = [k for k in TH_KEYS if k not in th]
     if th.get("generator") == "cells":
         missing += [k for k in CELLS_KEYS if k not in th]
@@ -153,6 +168,10 @@ def _load_thresholds(path: Path) -> dict:
         raise ValueError(f"{path}: anchor must be one of {', '.join(ANCHORS)}, not {th['anchor']!r}")
     if th["anchor"] == "center" and th["generator"] != "cells":
         raise ValueError(f"{path}: anchor 'center' needs the cells generator; segments take 'peak' or 'onset'")
+    if not isinstance(th["zoom"], bool):
+        raise ValueError(f"{path}: zoom must be true or false")
+    if th["verify_mode"] not in VERIFY_MODES:
+        raise ValueError(f"{path}: verify_mode must be one of {', '.join(VERIFY_MODES)}, not {th['verify_mode']!r}")
     return th
 
 
@@ -263,6 +282,8 @@ class _Cand:
     vtype: str = ""
     observation: str = ""
     rank: int | None = None
+    crop: tuple[int, int, int, int] | None = None
+    p_rules: dict[str, float | None] | None = None
 
 
 def _left(deadline: float) -> float:
@@ -332,6 +353,50 @@ def _verify_rules(cfg: _Config, grounded: str) -> list[dict]:
     rest = [r for r in cfg.detectable if r not in (grounded, "other")]
     tail = ["other"] if grounded != "other" and "other" in cfg.rules and "other" in cfg.detectable else []
     return [cfg.rules[r] for r in [grounded, *rest, *tail]]
+
+
+def _multi_rules(cfg: _Config) -> list[dict]:
+    """The multi check's questions: every detectable rule but the generic 'other', in catalogue order."""
+    return [cfg.rules[r] for r in cfg.detectable if r != "other"]
+
+
+def _take_multi(c: _Cand, rules: list[dict], answer: tuple[list, str], verify_th: float) -> None:
+    """Record a multi check's answer on c: P(YES) per rule, the observation, p_yes = the highest answer and
+    vtype = its rule when it reaches verify ("none" below). With no answer at all p_yes stays None: the check
+    failed, and the keep rule falls back to grounding as in single mode."""
+    ps, observation = answer
+    p_rules = {str(r["id"]): p for r, p in zip(rules, ps, strict=True)}
+    c.p_rules, c.observation = p_rules, observation
+    known = {r: p for r, p in p_rules.items() if p is not None}
+    if known:
+        best = max(known, key=lambda r: (known[r], r == c.rule_id))  # the grounded rule on a tie
+        c.p_yes, c.vtype = known[best], best if known[best] >= verify_th else "none"
+
+
+def _person_box(src: str, start: float, end: float, deadline: float, k: int) -> tuple[int, int, int, int] | None:
+    """Window k's person crop box, or None for the full frame: no person in it, the detector failed, or too
+    little time is left to wait for it."""
+    left = _left(deadline)
+    if left < WINDOWS_MIN_LEFT_SEC:
+        log.warning("window %d: %.1f s before the deadline, too late for the person box; cut uncropped", k, left)
+        return None
+    try:
+        box = zoom.person_box(src, start, end)
+        if box is None:
+            return None
+        x0, y0, x1, y1 = (int(v) for v in box)
+    except Exception as e:
+        log.warning("window %d: person box failed (%s: %s); cut uncropped", k, type(e).__name__, e)
+        return None
+    return x0, y0, x1, y1
+
+
+def _corpus_citation(x) -> dict | None:
+    """The judge's citation when each of its fields (document, clause, quote, url) is a non-empty string; else
+    None, and the event keeps its rule's catalogue citation."""
+    if isinstance(x, dict) and all(isinstance(x.get(k), str) and x[k].strip() for k in clients.CITATION_FIELDS):
+        return {k: x[k] for k in clients.CITATION_FIELDS}
+    return None
 
 
 def _judge_candidate(rule: dict) -> dict:
@@ -461,10 +526,20 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     t0 = time.monotonic()
     if cands and _left(deadline) >= WINDOWS_MIN_LEFT_SEC:
         def cut(k: int) -> str | None:
+            # with zoom, cropped to the people in it; a cropped cut that fails is retried on the full frame
             c = cands[k]
+            start, end = _clamp(c.t_start - WINDOW_PAD_SEC, duration), _clamp(c.t_end + WINDOW_PAD_SEC, duration)
+            out = os.path.join(work, f"window{k}.mp4")
+            if th["zoom"]:
+                c.crop = _person_box(src, start, end, deadline, k)
+            if c.crop:
+                try:
+                    return frames.cut_window(src, start, end, out, crop=c.crop)
+                except frames.VideoError as e:
+                    log.warning("window %d failed cropped (%s); cutting it uncropped", k, e)
+                    c.crop = None
             try:
-                return frames.cut_window(src, c.t_start - WINDOW_PAD_SEC, c.t_end + WINDOW_PAD_SEC,
-                                         os.path.join(work, f"window{k}.mp4"))
+                return frames.cut_window(src, start, end, out)
             except frames.VideoError as e:
                 log.warning("window %d failed: %s", k, e)
                 return None
@@ -477,9 +552,12 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     on_stage("verifying")
     t0 = time.monotonic()
     vt = min(VERIFY_MAX_SEC, _left(deadline) - VERIFY_RESERVE_SEC)
+    multi = th["verify_mode"] == "multi"
+    multi_rules = _multi_rules(cfg) if multi else []
     futures = {}
     if vt >= VERIFY_MIN_SEC:
-        futures = {k: pool.submit(verify, c.window, _verify_rules(cfg, c.rule_id), vt)
+        futures = {k: pool.submit(verify_multi, c.window, multi_rules, vt) if multi
+                   else pool.submit(verify, c.window, _verify_rules(cfg, c.rule_id), vt)
                    for k, c in enumerate(cands) if c.window}
     t1 = time.monotonic()
     for c in cands:
@@ -505,20 +583,27 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
             if f not in done:
                 continue
             try:
-                cands[k].p_yes, cands[k].vtype, cands[k].observation = f.result()
+                if multi:
+                    _take_multi(cands[k], multi_rules, f.result(), float(th["verify"]))
+                else:
+                    cands[k].p_yes, cands[k].vtype, cands[k].observation = f.result()
             except Exception as e:
                 log.warning("verify failed: %s", type(e).__name__)
     lap("verifying", t0)
 
     # 4. keep or drop every candidate (rejected ones stay in the result for the threshold sweep). A kept
-    # event takes VideoJev's best type BEFORE merging, so same-type events within merge_sec become one.
+    # event takes its type BEFORE merging, so same-type events within merge_sec become one: in multi mode the
+    # rule the check answered YES to (vtype), otherwise VideoJev's best type.
     events = []
     for c in cands:
         kept, reason = keep_decision(c.score, c.p_yes, c.p_yes is not None, th)
-        events.append(Event(rule_id=_best_type(c.type_probs, c.rule_id) if kept else c.rule_id,
-                            t_start=c.t_start, t_end=c.t_end, timecode=c.timecode, ground_score=c.score,
+        rid = c.rule_id
+        if kept:
+            rid = c.vtype if multi and c.vtype in cfg.detectable else _best_type(c.type_probs, c.rule_id)
+        events.append(Event(rule_id=rid, t_start=c.t_start, t_end=c.t_end, timecode=c.timecode, ground_score=c.score,
                             type_probs=c.type_probs, verify_score=c.p_yes, kept=kept, reason=reason,
-                            observation=c.observation, rank=c.rank))
+                            observation=c.observation, rank=c.rank, crop=list(c.crop) if c.crop else None,
+                            p_rules=c.p_rules))
     merged = merge_events_indexed(events, float(th["merge_sec"]))
     events = [ev for ev, _ in merged]
     kept_evs = [(ev, cands[i]) for ev, i in merged if ev.kept]  # each with its best member's candidate
@@ -533,14 +618,20 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     lap("evidence", t0)
 
     t1 = time.monotonic()
-    cand_ids = [judge_candidates(ev.type_probs or {c.rule_id: 1.0}, c.vtype if c.vtype in cfg.detectable else "")
-                for ev, c in kept_evs]
-    answers: dict[int, tuple] = {}
+
+    def candidate_ids(ev: Event, c: _Cand) -> list[str]:
+        # multi mode ranks the rules by the check's answers; without any (or in single mode) by VideoJev's choice
+        answered = {r: p for r, p in (c.p_rules or {}).items() if p is not None}
+        return judge_candidates(answered or ev.type_probs or {c.rule_id: 1.0},
+                                c.vtype if c.vtype in cfg.detectable else "")
+
+    cand_ids = [candidate_ids(ev, c) for ev, c in kept_evs]
+    answers: dict[int, dict | None] = {}
     jt = min(JUDGE_MAX_SEC, _left(deadline) - JUDGE_RESERVE_SEC)
     if kept_evs and jt >= JUDGE_MIN_SEC:
         jpool = ThreadPoolExecutor(max_workers=min(POOL_SIZE, len(kept_evs)), thread_name_prefix="judge")
         pools.append(jpool)
-        jf = {i: jpool.submit(judge, ev.observation, ev.evidence,
+        jf = {i: jpool.submit(judge_answer, ev.observation, ev.evidence,
                               [_judge_candidate(cfg.rules[r]) for r in cand_ids[i]], jt)
               for i, (ev, _) in enumerate(kept_evs)}
         done, _ = wait(jf.values(), timeout=jt + 2)
@@ -551,9 +642,12 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
                 except Exception as e:
                     log.warning("judge failed: %s", type(e).__name__)
     for i, (ev, _) in enumerate(kept_evs):
-        rid, just, _conf = answers.get(i, (None, "", None))
+        a = answers.get(i)
+        a = a if isinstance(a, dict) else {}
+        rid, just = a.get("rule_id"), a.get("justification")
         if accept_judge(rid, cand_ids[i]) and just:
             ev.type_source, ev.judge_rule_id, ev.justification = "judge", rid, just
+            ev.citation = _corpus_citation(a.get("citation"))
         else:
             ev.type_source, ev.judge_rule_id, ev.justification = "fallback", None, cfg.rules[ev.rule_id]["why"]
     lap("judging", t1)
@@ -565,9 +659,10 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
         "pipeline": "real",
         "videojev": videojev.get().version(),
         "ground_fps": f"{videojev.GROUND_FPS:g}",
-        "verifier": f"{clients.IV3_MODEL} at {os.environ.get('IV3_URL', clients.IV3_URL)}",
+        "verifier": f"{clients.IV3_MODEL} at {', '.join(clients.iv3_urls())}",
         "judge": (f"{os.environ.get('JUDGE_MODEL', clients.JUDGE_MODEL)} at "
                   f"{os.environ.get('JUDGE_URL', clients.JUDGE_URL)}") if clients.judge_enabled() else "off",
+        "zoom": zoom.DETECTOR if th["zoom"] else "off",
         "encoder": frames.video_encoder(),
         "rules": cfg.rules_version,
         "thresholds": json.dumps(th, sort_keys=True),

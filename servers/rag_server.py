@@ -18,7 +18,8 @@ How a judge request is answered:
   (matcher.clause_candidates). Retrieved clauses are dropped from the end while the prompt
   is over the /generate limit (matcher.fit_clauses). matcher.judge_prompt runs both and
   builds the prompt; tools/rag_eval.py calls the same function.
-- The LLM (by default InternVideo3's text-only POST /generate at RAG_LLM_URL, with a
+- The LLM (by default InternVideo3's text-only POST /generate at RAG_LLM_URL, or spread over the
+  comma-separated RAG_LLM_URLS, with a
   timeout of RAG_LLM_TIMEOUT seconds) picks the rule, the clause or none, and P(violation)
   from matcher.build_prompt. matcher.parse_answer reads its JSON.
 - The model never writes the citation. For the chosen clause the server takes the act's
@@ -45,7 +46,7 @@ from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-from pipeline import clients  # noqa: E402
+from pipeline import clients, replicas  # noqa: E402
 from rag import matcher  # noqa: E402
 from rag.corpus import Clause, find_quote, load_clauses, passages  # noqa: E402
 from rag.retrieve import TOP_K, Index  # noqa: E402
@@ -74,6 +75,17 @@ def http_llm(url: str) -> LLM:
         if not isinstance(d, dict) or not isinstance(d.get("text"), str):
             raise ValueError("reply without a text")
         return d["text"]
+    return call
+
+
+def pooled_llm(urls: list[str]) -> LLM:
+    """http_llm over several /generate replicas: each call goes to the least busy one, and to another once when the
+    chosen one refuses the connection."""
+    pool = replicas.Pool(urls)
+    calls = {u: http_llm(u) for u in pool.urls}
+
+    def call(system: str, prompt: str, timeout: float) -> str:
+        return replicas.call_with_failover(pool, lambda url, left: calls[url](system, prompt, left), timeout)
     return call
 
 
@@ -177,9 +189,9 @@ async def lifespan(app: FastAPI):
     app.state.index = Index(clauses)
     log.info("indexed %d clauses, %d passages in %.1f s", len(clauses), len(passages(clauses)),
              time.perf_counter() - t0)
-    url = os.environ.get("RAG_LLM_URL", LLM_URL)
-    app.state.llm, app.state.llm_timeout = http_llm(url), float(os.environ.get("RAG_LLM_TIMEOUT", LLM_TIMEOUT))
-    log.info("LLM at %s, timeout %.0f s", url, app.state.llm_timeout)
+    urls = replicas.parse_urls(os.environ.get("RAG_LLM_URLS"), os.environ.get("RAG_LLM_URL", LLM_URL))
+    app.state.llm, app.state.llm_timeout = pooled_llm(urls), float(os.environ.get("RAG_LLM_TIMEOUT", LLM_TIMEOUT))
+    log.info("LLM at %s, timeout %.0f s", ", ".join(urls), app.state.llm_timeout)
     yield
     app.state.index = app.state.llm = None
 

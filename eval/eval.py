@@ -174,7 +174,9 @@ SKIP_NAMES = {"summary", "per_clip"}
 TOL_SEC = 2.0
 VERIFY_GRID = [round(0.01 * i, 2) for i in range(1, 31)] + [round(0.05 * i, 2) for i in range(7, 20)]
 GRID = [round(0.05 * i, 2) for i in range(1, 20)]  # cand and strong, segments runs only
-RUN_KEYS = ("generator", "cell_sec", "rank", "anchor", "anchor_offset_sec", "merge_sec")  # how a run made candidates
+# How a run made and checked its candidates: verify is chosen on the run's own scores, so these go with it.
+RUN_KEYS = ("generator", "cell_sec", "rank", "anchor", "anchor_offset_sec", "merge_sec", "zoom", "verify_mode")
+RUN_DEFAULTS = {"zoom": False, "verify_mode": "single"}  # a run recorded before these switches ran like this
 
 
 def _load_run(run_dir, labels):
@@ -376,6 +378,8 @@ def cmd_sweep(a, keep=None) -> int:
               f"at any point; not found at the chosen point: {', '.join(missed)}")
     out = dict(base)
     out.update({k: run_th[k] for k in RUN_KEYS if k in run_th})
+    if run_th:
+        out.update({k: v for k, v in RUN_DEFAULTS.items() if k not in run_th})
     out["generator"] = gen
     if cells and _num(clips[0][1].get("cell_sec")):
         out["cell_sec"] = clips[0][1]["cell_sec"]

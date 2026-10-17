@@ -9,9 +9,11 @@ import logging
 import math
 import os
 import re
+import threading
 
 import httpx
 
+from pipeline import replicas
 from pipeline.types import Frame
 
 log = logging.getLogger(__name__)
@@ -68,6 +70,36 @@ def _post(url: str, body: dict, timeout: float):
     return httpx.post(url, json=body, timeout=_timeout(timeout), trust_env=False)
 
 
+_pool: replicas.Pool | None = None
+_pool_lock = threading.Lock()
+
+
+def iv3_urls() -> list[str]:
+    """The InternVideo3 /verify replicas: IV3_URLS (comma-separated), else [IV3_URL], else the default."""
+    return replicas.parse_urls(os.environ.get("IV3_URLS"), os.environ.get("IV3_URL", IV3_URL))
+
+
+def _reset_pool() -> None:
+    global _pool
+    with _pool_lock:
+        _pool = None
+
+
+def _iv3_pool() -> replicas.Pool:
+    """The process's pool, created on first use. It is rebuilt when the environment names other URLs."""
+    global _pool
+    urls = iv3_urls()
+    with _pool_lock:
+        pool = _pool
+        if pool is None or pool.urls != urls:
+            pool = _pool = replicas.Pool(urls)
+        return pool
+
+
+def _post_iv3(body: dict, timeout: float):
+    return replicas.call_with_failover(_iv3_pool(), lambda url, left: _post(url, body, left), timeout)
+
+
 def _prob(x) -> float | None:
     if isinstance(x, bool) or not isinstance(x, (int, float)):
         return None
@@ -108,7 +140,7 @@ def verify(window_path, rules: list[dict], timeout: float) -> tuple[float | None
             return None, "", ""
         body = {"video_path": os.path.abspath(str(window_path)), "prompt": verify_prompt(rules),
                 "fps": VERIFY_FPS}
-        r = _post(os.environ.get("IV3_URL", IV3_URL), body, timeout)
+        r = _post_iv3(body, timeout)
         if r.status_code != 200:
             log.warning("verify: HTTP %s", r.status_code)
             return None, "", ""
@@ -135,7 +167,7 @@ def verify_multi(window_path, rules: list[dict], timeout: float) -> tuple[list[f
             return [None] * len(rules), ""
         body = {"video_path": os.path.abspath(str(window_path)), "prompt": multi_prompt(rules),
                 "fps": VERIFY_FPS, "n_answers": len(rules)}
-        r = _post(os.environ.get("IV3_URL", IV3_URL), body, timeout)
+        r = _post_iv3(body, timeout)
         if r.status_code != 200:
             log.warning("verify_multi: HTTP %s", r.status_code)
             return [None] * len(rules), ""
