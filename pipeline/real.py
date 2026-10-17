@@ -659,7 +659,7 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
         "pipeline": "real",
         "videojev": videojev.get().version(),
         "ground_fps": f"{videojev.GROUND_FPS:g}",
-        "verifier": f"{clients.IV3_MODEL} at {os.environ.get('IV3_URL', clients.IV3_URL)}",
+        "verifier": f"{clients.IV3_MODEL} at {', '.join(clients.iv3_urls())}",
         "judge": (f"{os.environ.get('JUDGE_MODEL', clients.JUDGE_MODEL)} at "
                   f"{os.environ.get('JUDGE_URL', clients.JUDGE_URL)}") if clients.judge_enabled() else "off",
         "zoom": zoom.DETECTOR if th["zoom"] else "off",
