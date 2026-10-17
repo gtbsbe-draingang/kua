@@ -175,6 +175,37 @@ def keep_table(rows: list[dict], labels: dict, vs: list[float], strong: float | 
     return out
 
 
+def operating_points(rows: list[dict], labels: dict, vs: list[float], ms: list[int]) -> list[dict]:
+    """Keep p_yes >= v, at most m events per clip (highest p_yes first). Per (v, m): violation clips with a
+    kept event (verdict recall), violation clips with every label matched (found), clean clips with a kept
+    event (FP), verdict accuracy over all clips, and kept events per flagged clip."""
+    viol = [c for c, i in labels.items() if i["has_violation"]]
+    clean = [c for c, i in labels.items() if not i["has_violation"]]
+    by_clip: dict[str, list[dict]] = {}
+    for r in rows:
+        if r["p_yes"] is not None:
+            by_clip.setdefault(r["clip"], []).append(r)
+    out = []
+    for v in vs:
+        for m in ms:
+            kept = [r for rs in by_clip.values()
+                    for r in sorted((x for x in rs if x["p_yes"] >= v), key=lambda x: -x["p_yes"])[:m]]
+            flagged = {r["clip"] for r in kept}
+            vr = sum(c in flagged for c in viol)
+            fp = sum(c in flagged for c in clean)
+            found = sum(all(any(r["clip"] == c and abs(r["timecode"] - t["t_label"]) <= TOL + EPS for r in kept)
+                            for t in labels[c]["truth"]) for c in viol)
+            out.append({"v": v, "m": m, "verdict_recall": vr, "found": found, "fp": fp,
+                        "acc": (vr + len(clean) - fp) / len(labels) if labels else 0.0,
+                        "events": len(kept) / len(flagged) if flagged else 0.0})
+    return out
+
+
+def _logit(p: float) -> float:
+    p = min(max(p, 1e-6), 1 - 1e-6)
+    return math.log(p / (1 - p))
+
+
 def cmd_report(a) -> int:
     sys.path.insert(0, str(SVC))
     sys.path.insert(0, str(SVC / "tools"))
@@ -216,11 +247,47 @@ def cmd_report(a) -> int:
                   f"p_yes {f3(auc(cpos, cneg))} ({len(cpos)} vs {len(cneg)}) | mean p_yes matched "
                   f"{f3(sum(pos) / len(pos) if pos else None)}, clean {f3(sum(neg) / len(neg) if neg else None)}"
                   f" | verify {sum(secs) / len(secs):.2f} s mean, {max(secs):.2f} s max")
-            if want is None and len(got) == len(rows):  # keep tables only over complete coverage
+            srt = sorted(secs)
+            types = {}
+            for r in got:
+                types[r["type_id"] or "-"] = types.get(r["type_id"] or "-", 0) + 1
+            print(f"  verify time median {srt[len(srt) // 2]:.2f} s, p95 {srt[int(0.95 * (len(srt) - 1))]:.2f} s | "
+                  f"TYPE counts {dict(sorted(types.items(), key=lambda kv: -kv[1]))}")
+            if want is None and len(got) == len(rows):  # tables only over complete coverage
+                m_pos = [r for r in got if r["matched"]]
+                m_neg = [r for r in got if not r["has_violation"]]
+                med = {c: sorted(r["p_yes"] for r in got if r["clip"] == c) for c in clips}
+                rel = {id(r): r["p_yes"] - med[r["clip"]][len(med[r["clip"]]) // 2] for r in got}
+                extra = {"window grounding score": auc([r["score"] for r in m_pos], [r["score"] for r in m_neg]),
+                         "p_yes - clip median": auc([rel[id(r)] for r in m_pos], [rel[id(r)] for r in m_neg]),
+                         "matched vs unmatched windows on violation clips": auc(pos, other)}
+                for alpha in (0.5, 1.0):
+                    f = lambda r, al=alpha: _logit(r["p_yes"]) + al * r["score"]  # noqa: E731
+                    extra[f"logit(p_yes) + {alpha} * score"] = auc([f(r) for r in m_pos], [f(r) for r in m_neg])
+                print("  other window AUCs (matched vs clean unless named): "
+                      + "; ".join(f"{k} {f3(x)}" for k, x in extra.items()))
                 vs = [round(0.05 * i, 2) for i in range(1, 20)]
                 print("| v | recall (clips) | found | FP clips |\n|---|---|---|---|")
                 for v, rec, found, fp in keep_table(got, labels, vs):
                     print(f"| {v:.2f} | {rec:.3f} | {found} | {fp} |")
+                print("| v | m | verdict recall | found | FP clips | verdict acc | events per flagged clip |\n"
+                      "|---|---|---|---|---|---|---|")
+                for o in operating_points(got, labels, [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6],
+                                          [1, 2, 6]):
+                    print(f"| {o['v']:.2f} | {o['m']} | {o['verdict_recall']} | {o['found']} | {o['fp']} | "
+                          f"{o['acc']:.3f} | {o['events']:.2f} |")
+        if want is not None:  # the same windows under both prompts
+            both = [(x, y) for x, y in zip(join(cands, labels, cache, "pipeline"), join(cands, labels, cache, "rule"),
+                                           strict=True)
+                    if x["p_yes"] is not None and y["p_yes"] is not None]
+            if len(both) > 2:
+                xs, ys = [x["p_yes"] for x, _ in both], [y["p_yes"] for _, y in both]
+                mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+                cov = sum((u - mx) * (w - my) for u, w in zip(xs, ys, strict=True))
+                sd = math.sqrt(sum((u - mx) ** 2 for u in xs) * sum((w - my) ** 2 for w in ys))
+                print(f"paired windows {len(both)}: Pearson r of p_yes (pipeline vs rule) {cov / sd:.3f}; TYPE not "
+                      f"none: pipeline {sum(x['type_id'] not in ('none', '') for x, _ in both)}, rule "
+                      f"{sum(y['type_id'] not in ('none', '') for _, y in both)}")
     return 0
 
 

@@ -138,3 +138,15 @@ def test_keep_table_counts_found_clips_and_fp_clips():
     rows = [{"clip": "X-1", "timecode": 11.0, "p_yes": 0.4}, {"clip": "X-1", "timecode": 20.0, "p_yes": 0.9},
             {"clip": "X-2", "timecode": 3.0, "p_yes": 0.3}, {"clip": "X-2", "timecode": 9.0, "p_yes": None}]
     assert vc.keep_table(rows, labels, [0.2, 0.35, 0.5]) == [(0.2, 1.0, 1, 1), (0.35, 1.0, 1, 0), (0.5, 0.0, 0, 0)]
+
+
+def test_operating_points_cap_events_per_clip_and_score_verdicts():
+    import verify_candidates as vc
+
+    labels = {"X-1": {"has_violation": 1, "truth": [{"t_label": 10.0}]},
+              "X-2": {"has_violation": 0, "truth": []}}
+    rows = [{"clip": "X-1", "timecode": 11.0, "p_yes": 0.4}, {"clip": "X-1", "timecode": 20.0, "p_yes": 0.9},
+            {"clip": "X-2", "timecode": 3.0, "p_yes": 0.3}]
+    one, six = vc.operating_points(rows, labels, [0.2], [1, 6])
+    assert (one["verdict_recall"], one["found"], one["fp"], one["acc"], one["events"]) == (1, 0, 1, 0.5, 1.0)
+    assert (six["found"], six["events"]) == (1, 1.5)
