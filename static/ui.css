@@ -534,6 +534,13 @@ main { display: grid; gap: calc(var(--shadow) + 22px); padding-bottom: 48px; }
 .tl-mark:hover::after, .tl-mark:hover::before { background: var(--violet-300); }
 .tl-mark.is-current { z-index: 20 !important; background: var(--ink); box-shadow: 0 0 0 4px rgba(155, 123, 255, 0.45); }
 .tl-mark.is-current::after, .tl-mark.is-current::before { background: var(--ink); }
+/* weak signal: a hollow marker with a violet outline instead of the solid one */
+.tl-mark.is-weak { background: var(--violet-950); color: var(--violet-300); box-shadow: inset 0 0 0 2px var(--violet-500); }
+.tl-mark.is-weak::after, .tl-mark.is-weak::before { background: var(--violet-500); }
+.tl-mark.is-weak:hover { background: var(--violet-900); box-shadow: inset 0 0 0 2px var(--violet-300); }
+.tl-mark.is-weak:hover::after, .tl-mark.is-weak:hover::before { background: var(--violet-300); }
+.tl-mark.is-weak.is-current { background: var(--ink); color: var(--violet-950); box-shadow: 0 0 0 4px rgba(155, 123, 255, 0.45); }
+.tl-mark.is-weak.is-current::after, .tl-mark.is-weak.is-current::before { background: var(--ink); }
 
 .tl-track {
   position: relative;
@@ -553,6 +560,8 @@ main { display: grid; gap: calc(var(--shadow) + 22px); padding-bottom: 48px; }
   border-right: 2px solid var(--violation);
 }
 .tl-band.is-current { background: rgba(255, 181, 71, 0.55); }
+.tl-band.is-weak { background: rgba(255, 181, 71, 0.14); border-left-color: rgba(255, 181, 71, 0.5); border-right-color: rgba(255, 181, 71, 0.5); }
+.tl-band.is-weak.is-current { background: rgba(255, 181, 71, 0.4); border-left-color: var(--violation); border-right-color: var(--violation); }
 .tl-head {
   position: absolute;
   top: -6px;
@@ -582,6 +591,11 @@ main { display: grid; gap: calc(var(--shadow) + 22px); padding-bottom: 48px; }
 
 .event-card { display: grid; gap: 16px; }
 .event-card.is-current { background: var(--violet-800); border-color: var(--violet-500); box-shadow: var(--shadow) var(--shadow) 0 var(--violet-950); }
+/* weak signal: a flat card with a dashed border and a hollow number; text stays fully readable */
+.event-card.is-weak { border-style: dashed; border-color: var(--line-ghost); box-shadow: var(--shadow) var(--shadow) 0 var(--violet-900); }
+.event-card.is-weak.is-current { border-color: var(--violet-500); box-shadow: var(--shadow) var(--shadow) 0 var(--violet-950); }
+.event-card.is-weak .ev-no { background: none; color: var(--violet-300); box-shadow: inset 0 0 0 2px var(--line-ghost); }
+.event-card.is-weak.is-current .ev-no { box-shadow: inset 0 0 0 2px var(--violet-500); }
 .event-card.is-current .ev-text, .event-card.is-current blockquote { color: var(--ink); }
 .event-card.is-current .label { color: var(--violet-300); }
 

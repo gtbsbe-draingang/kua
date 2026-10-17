@@ -72,6 +72,7 @@ def to_api(job_id: str, result: PipelineResult, rules: dict) -> dict:
             "type_source": ev.type_source,
             "t_start": _r1(ev.t_start),
             "t_end": _r1(ev.t_end),
+            "weak_signal": bool(ev.weak),
         })
     return {"job_id": job_id, "status": "done", "verdict": result.verdict, "violations": violations}
 
@@ -137,7 +138,8 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
         index_html = STATIC_DIR / "index.html"
         if not index_html.is_file():
             raise HTTPException(status_code=404, detail="UI not installed")
-        return FileResponse(index_html)
+        # no-cache: the browser revalidates the page on every visit, so a redeploy (new ?v= asset links) reaches it
+        return FileResponse(index_html, headers={"Cache-Control": "no-cache"})
 
     # fonts, ui.css and ui.js. StaticFiles fails every request with a 500 when its folder is missing, so
     # mount it only when the folder exists; otherwise /static/... is a plain 404, like "/" without an index

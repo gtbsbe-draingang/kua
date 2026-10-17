@@ -18,7 +18,7 @@ KEY = {"X-API-Key": "k"}
 ROOT = Path(__file__).resolve().parent.parent
 BRIEF_KEYS = ["type", "timecode_sec", "description", "evidence_frames"]
 OLD_KEYS = BRIEF_KEYS + ["type_id", "rule", "confidence"]
-NEW_KEYS = ["observation", "justification", "type_source", "t_start", "t_end"]
+NEW_KEYS = ["observation", "justification", "type_source", "t_start", "t_end", "weak_signal"]
 
 
 @pytest.fixture(scope="module")
@@ -64,6 +64,21 @@ def test_violation_has_new_keys_after_the_existing_ones(rules):
     assert v["t_start"] == 2.0 and v["t_end"] == 5.1
     assert type(v["t_start"]) is float and type(v["t_end"]) is float
     assert type(v["observation"]) is str and type(v["justification"]) is str
+    assert v["weak_signal"] is False
+
+
+def test_weak_signal_follows_the_event_and_the_description_carries_its_hedged_text(rules):
+    why = rules["cash_unattended"]["why"]
+    ev = make_event(3.04, observation="Кассир отходит.", justification=why, judge_rule_id="cash_unattended",
+                    type_source="judge", weak=True, judge_violation=0.0, judge_text="Нарушений нет.")
+    strong = make_event(9.0, observation="Кассир отходит.", justification="Текст.", judge_rule_id="cash_unattended",
+                        type_source="judge", judge_violation=0.9, judge_text="Текст.")
+    weak_v, strong_v = api.to_api("abc", PipelineResult("violation", [ev, strong], {}, {}), rules)["violations"]
+    assert weak_v["weak_signal"] is True and type(weak_v["weak_signal"]) is bool
+    assert strong_v["weak_signal"] is False and type(strong_v["weak_signal"]) is bool
+    assert weak_v["justification"] == why and f"Кассир отходит. {why} Основание: " in weak_v["description"]
+    assert "Нарушений нет." not in json.dumps(weak_v, ensure_ascii=False)  # the judge's words are debug only
+    assert list(weak_v) == list(strong_v) == OLD_KEYS + NEW_KEYS
 
 
 def test_violation_observation_none_becomes_empty_and_type_source_follows_event(rules):
@@ -332,6 +347,16 @@ def test_static_missing_file_and_traversal_are_404(tmp_path, rules, static_dir):
 def test_index_still_served_at_root(tmp_path, rules, static_dir):
     r = make_client(tmp_path, rules).get("/")
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/html") and "Kuá" in r.text
+
+
+def test_index_is_served_with_no_cache_so_a_redeploy_reaches_browsers(tmp_path, rules, static_dir):
+    r = make_client(tmp_path, rules).get("/")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    assert "cache-control" not in make_client(tmp_path, rules).get("/static/ui.css").headers  # assets are keyed by ?v=
+
+
+def test_real_index_has_no_cache_header(tmp_path, rules):
+    assert make_client(tmp_path, rules).get("/").headers["cache-control"] == "no-cache"
 
 
 def test_index_404_when_missing(tmp_path, rules, static_dir):

@@ -1,1 +1,1 @@
-{"generator":"grid","cell_sec":4.0,"rank":"logit","cand":0.25,"verify":0.05,"strong":null,"fallback":0.5,"top_k":16,"merge_sec":3,"anchor":"center","anchor_offset_sec":0,"zoom":false,"verify_mode":"single"}
+{"generator":"grid","cell_sec":4.0,"rank":"logit","cand":0.25,"verify":0.05,"strong":null,"fallback":0.5,"top_k":16,"merge_sec":3,"anchor":"center","anchor_offset_sec":0,"zoom":false,"verify_mode":"single","judge_weak":0.5}

@@ -22,6 +22,10 @@ Two switches in thresholds.json change how each window is checked; both are off 
   reaches `verify`, is the check's type.
 The judge (clients.judge_answer) may also give a corpus citation for its rule, which then replaces the rule's
 catalogue citation in the result.
+The judge also gives its own probability of a violation (`violation`). Below `judge_weak` in thresholds.json
+(0.5 when a file leaves it out) the answer is a weak signal: the event keeps the judge's rule and citation, but
+its justification becomes the rule's hedged catalogue text and `Event.weak` is set. The judge's own words stay
+in `Event.judge_text`. Detection and the verdict never depend on it.
 
 `ground`, `choose`, `verify`, `verify_multi` and `judge_answer` are the module-level wrappers the tests mock.
 """
@@ -75,7 +79,7 @@ TH_KEYS = ("generator", "cand", "verify", "strong", "fallback", "top_k", "merge_
            "anchor_offset_sec")
 CELLS_KEYS = ("cell_sec", "rank")  # required by the cells generator
 GRID_KEYS = ("cell_sec",)  # required by the grid generator (no rank: nothing is ranked)
-TH_DEFAULTS = {"zoom": False, "verify_mode": "single"}  # the switches, as a file without them runs
+TH_DEFAULTS = {"zoom": False, "verify_mode": "single", "judge_weak": 0.5}  # as a file without them runs
 VERIFY_MODES = ("single", "multi")
 GENERATORS = ("cells", "segments", "grid")
 RANKS = ("logit",)
@@ -179,6 +183,8 @@ def _load_thresholds(path: Path) -> dict:
         raise ValueError(f"{path}: zoom must be true or false")
     if th["verify_mode"] not in VERIFY_MODES:
         raise ValueError(f"{path}: verify_mode must be one of {', '.join(VERIFY_MODES)}, not {th['verify_mode']!r}")
+    if not (_number(th["judge_weak"]) and 0 <= th["judge_weak"] <= 1):
+        raise ValueError(f"{path}: judge_weak must be a number from 0 to 1")
     return th
 
 
@@ -719,6 +725,10 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
         if accept_judge(rid, cand_ids[i]) and just:
             ev.type_source, ev.judge_rule_id, ev.justification = "judge", rid, just
             ev.citation = _corpus_citation(a.get("citation"))
+            ev.judge_text, ev.judge_violation = just, a.get("violation")
+            if ev.judge_violation is not None and ev.judge_violation < th["judge_weak"]:
+                # the judge itself sees no violation: show the rule's hedged text instead of its "no violation" one
+                ev.justification, ev.weak = cfg.rules[rid]["why"], True
         else:
             ev.type_source, ev.judge_rule_id, ev.justification = "fallback", None, cfg.rules[ev.rule_id]["why"]
     lap("judging", t1)
