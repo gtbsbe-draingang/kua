@@ -84,7 +84,8 @@ start() {
   mkdir -p "$(dirname "$LOG")"
   echo "[$(date -u '+%F %T')] start judge llm ($free MiB of GPU memory free, --mem-fraction-static $fraction)" >>"$LOG"
   # setsid: its own session, so stop can find every process it spawned. 8>&-: the server must not keep the lock.
-  OMP_NUM_THREADS=4 setsid nohup "$PY" -m sglang.launch_server \
+  # PATH: SGLang compiles its JIT kernels with ninja, which lives in env/vlm/bin (nvcc and gcc come from env.sh).
+  PATH="$MTA_ROOT/env/vlm/bin:$PATH" OMP_NUM_THREADS=4 setsid nohup "$PY" -m sglang.launch_server \
     --model-path "$MODEL_PATH" --served-model-name "$SERVED_NAME" \
     --host 127.0.0.1 --port "$PORT" \
     --mem-fraction-static "$fraction" --context-length 32768 \
