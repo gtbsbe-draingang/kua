@@ -1,4 +1,5 @@
-"""The real pipeline end to end with the four model calls mocked (ground, choose, verify, judge)."""
+"""The real pipeline end to end with the model calls mocked (ground, choose, verify, verify_multi, judge_answer and
+the person box)."""
 import io
 import json
 import logging
@@ -15,7 +16,7 @@ import yaml
 from PIL import Image
 
 import pipeline
-from pipeline import frames, real, videojev
+from pipeline import frames, real, videojev, zoom
 from pipeline.frames import probe
 from pipeline.videojev import Curves
 from rules import load_rules
@@ -25,20 +26,23 @@ ROOT = Path(__file__).resolve().parent.parent
 TH = {"generator": "segments", "cand": 0.25, "verify": 0.5, "strong": 0.8, "fallback": 0.5, "top_k": 6,
       "merge_sec": 3, "anchor": "peak", "anchor_offset_sec": 0}
 TH_CELLS = {**TH, "generator": "cells", "cell_sec": 4.0, "rank": "logit", "strong": None, "anchor": "center"}
-REAL_JUDGE, REAL_GROUND, REAL_CHOOSE = real.judge, real.ground, real.choose
+REAL_JUDGE_ANSWER, REAL_GROUND, REAL_CHOOSE = real.judge_answer, real.ground, real.choose
 LOW = 0.05
 
 
 class Rig:
-    """Scripted model answers. curves: rule id -> curve given to that rule's first query (others stay LOW)."""
+    """Scripted model answers. curves: rule id -> curve given to that rule's first query (others stay LOW).
+    multi: window index -> ({rule id: P(YES)}, observation) for verify_multi (rules left out answer None).
+    judge_answer: a (rule_id, justification, confidence) triple or a full clients.judge_answer dict."""
 
     def __init__(self, rules):
         self.rules = rules
-        self.curves, self.verdicts, self.choice = {}, {}, {}
+        self.curves, self.verdicts, self.choice, self.multi = {}, {}, {}, {}
         self.judge_answer = (None, "", None)
         self.curves_cls = None
         self.choose_error = None
         self.ground_calls, self.choose_calls, self.verify_calls, self.judge_calls = [], [], [], []
+        self.multi_calls, self.box_calls = [], []
         self.ground_coded, self.choose_coded = None, []
         self.ground_timeouts, self.choose_timeouts = [], []
 
@@ -70,10 +74,26 @@ class Rig:
         self.verify_calls.append(info)
         return self.verdicts.get(rules[0]["id"], (None, "", ""))
 
-    def judge(self, observation, evidence, candidates, timeout):
+    def verify_multi(self, window, rules, timeout):
+        k = int(Path(window).stem.removeprefix("window"))
+        self.multi_calls.append({"k": k, "ids": [r["id"] for r in rules], "timeout": timeout,
+                                 "coded": coded(window)})
+        ps, obs = self.multi.get(k, ({}, ""))
+        return [ps.get(r["id"]) for r in rules], obs
+
+    def judge(self, observation, evidence, candidates, timeout):  # stands in for clients.judge_answer
         self.judge_calls.append({"observation": observation, "evidence": evidence,
                                  "candidates": candidates, "timeout": timeout})
-        return self.judge_answer
+        a = self.judge_answer
+        if a is None or isinstance(a, dict):
+            return a
+        rid, just, conf = a
+        return None if rid is None else {"rule_id": rid, "justification": just, "confidence": conf,
+                                         "clause_id": None, "violation": None, "citation": None}
+
+    def person_box(self, path, start, end):  # no person found unless a test says otherwise
+        self.box_calls.append((path, start, end))
+        return None
 
 
 def coded(path):
@@ -100,8 +120,10 @@ def setup_rig(monkeypatch, tmp_path, rules, th=None):
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     r = Rig(rules)
     r.scratch = scratch
-    for name in ("ground", "choose", "verify", "judge"):
-        monkeypatch.setattr(real, name, getattr(r, name))
+    for name, fake in (("ground", r.ground), ("choose", r.choose), ("verify", r.verify),
+                       ("verify_multi", r.verify_multi), ("judge_answer", r.judge)):
+        monkeypatch.setattr(real, name, fake)
+    monkeypatch.setattr(zoom, "person_box", r.person_box)
     return r
 
 
@@ -187,7 +209,7 @@ def test_real_mocked_end_to_end(rig, clip, rules):
 
     assert {"decoding", "grounding", "choosing", "verifying", "writing", "total"} <= set(res.timings)
     assert res.versions["pipeline"] == "real" and res.versions["rules"].startswith("v1 ")
-    assert json.loads(res.versions["thresholds"]) == TH
+    assert json.loads(res.versions["thresholds"]) == {**TH, "zoom": False, "verify_mode": "single"}  # the defaults
     assert sorted(os.listdir(Path(clip).parent)) == ["input.mov"]  # nothing written next to the input
     assert os.listdir(rig.scratch) == []  # the work folder is removed
 
@@ -203,7 +225,7 @@ def test_judge_answer_not_a_candidate_falls_back(rig, clip, rules):
 
 
 def test_judge_absent_uses_best_choice_type_and_rule_why(rig, clip, rules, monkeypatch):
-    monkeypatch.setattr(real, "judge", REAL_JUDGE)
+    monkeypatch.setattr(real, "judge_answer", REAL_JUDGE_ANSWER)
     monkeypatch.setenv("JUDGE_URL", "")
     two_candidates(rig)
     rig.choice = {"cash_unattended": 0.2, "previous_cash_on_desk": 0.5, "none": 0.3}
@@ -551,7 +573,7 @@ def test_cells_end_to_end(cells_rig, clip):
     dbg = json.loads(json.dumps(to_debug(res)))
     assert (dbg["generator"], dbg["cell_sec"], dbg["generator_fallback"]) == ("cells", 4.0, False)
     assert [e["rank"] for e in dbg["events"]] == [0, 1]
-    assert json.loads(res.versions["thresholds"]) == TH_CELLS
+    assert json.loads(res.versions["thresholds"]) == {**TH_CELLS, "zoom": False, "verify_mode": "single"}
 
 
 def test_cells_rule_is_the_rank_argmax_query_and_ground_is_the_cell_raw_max(monkeypatch, tmp_path, rules, clip):
@@ -631,7 +653,9 @@ def test_thresholds_strong_null_cells_keys_and_rejections(tmp_path):
     assert real._load_thresholds(p)["generator"] == "segments"
     bad = [({"strong": "high"}, "strong"), ({"strong": True}, "strong"), ({"strong": float("nan")}, "strong"),
            ({"generator": "peaks"}, "generator"), ({"rank": "z"}, "rank"), ({"cell_sec": 0}, "cell_sec"),
-           ({"cell_sec": None}, "cell_sec"), ({"anchor": "middle"}, "anchor")]
+           ({"cell_sec": None}, "cell_sec"), ({"anchor": "middle"}, "anchor"), ({"zoom": "yes"}, "zoom"),
+           ({"zoom": 1}, "zoom"), ({"zoom": None}, "zoom"), ({"verify_mode": "both"}, "verify_mode"),
+           ({"verify_mode": None}, "verify_mode"), ({"verify_mode": ["multi"]}, "verify_mode")]
     for change, match in bad:
         p.write_text(json.dumps({**TH_CELLS, **change}))
         with pytest.raises(ValueError, match=match):
@@ -646,6 +670,210 @@ def test_thresholds_strong_null_cells_keys_and_rejections(tmp_path):
 
 
 def test_committed_thresholds_use_cells_without_strong():
+    # top_k 8 checks every cell of a clip up to 32 s; zoom and the per-rule check stay off until measured
     assert real._load_thresholds(ROOT / "thresholds.json") == {
         "generator": "cells", "cell_sec": 4.0, "rank": "logit", "cand": 0.25, "verify": 0.05, "strong": None,
-        "fallback": 0.5, "top_k": 6, "merge_sec": 3, "anchor": "center", "anchor_offset_sec": 0}
+        "fallback": 0.5, "top_k": 8, "merge_sec": 3, "anchor": "center", "anchor_offset_sec": 0,
+        "zoom": False, "verify_mode": "single"}
+
+
+# ---- the switches: zoom and the per-rule check -----------------------------------------------------------
+# On the 6 s clip the cells rig has two cells, [0, 4] and [4, 6], so the windows are [0, 6] and [2, 6].
+
+def _spy_cut_window(monkeypatch, fail_cropped=False):
+    calls = []
+    cut = frames.cut_window
+
+    def spy(path, start, end, out_path, crop=None):
+        calls.append({"path": path, "start": start, "end": end, "crop": crop})
+        if crop and fail_cropped:
+            raise frames.VideoError("ffmpeg failed: crop")
+        return cut(path, start, end, out_path, crop=crop)
+
+    monkeypatch.setattr(frames, "cut_window", spy)
+    return calls
+
+
+def test_zoom_crop_passed_to_cut_window(monkeypatch, tmp_path, rules, rotated_clip):
+    from pipeline.types import to_debug
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "zoom": True})
+    clip = str(shutil.copy(rotated_clip, tmp_path / "input.mov"))
+    two_candidates(rig)
+    boxes = []
+
+    def person_box(path, start, end):
+        boxes.append((path, start, end))
+        return 100, 100, 500, 300  # inside the 848x464 upright frame
+
+    monkeypatch.setattr(zoom, "person_box", person_box)
+    cuts = _spy_cut_window(monkeypatch)
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    (src, _), = rig.ground_calls
+    assert src != clip  # the box is found on the upright copy the windows are cut from
+    assert sorted(boxes) == [(src, 0.0, pytest.approx(6.0, abs=0.05)), (src, 2.0, pytest.approx(6.0, abs=0.05))]
+    assert sorted((c["path"], c["start"], c["end"], c["crop"]) for c in cuts) == [
+        (src, s, e, (100, 100, 500, 300)) for _, s, e in sorted(boxes)]
+    assert [c["coded"][1:3] for c in rig.verify_calls] == [(896, 448)] * 2  # 400x200 scaled to long side 896
+    assert [e.crop for e in res.events] == [[100, 100, 500, 300]] * 2
+    dbg = json.loads(json.dumps(to_debug(res)))
+    assert [e["crop"] for e in dbg["events"]] == [[100, 100, 500, 300]] * 2
+    assert [(e.rule_id, e.reason) for e in res.events] == [
+        ("cash_unattended", "verified"), ("personal_items_at_workplace", "rejected")]
+
+
+def test_zoom_failure_falls_back_to_full_frame(monkeypatch, tmp_path, rules, clip, caplog):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "zoom": True})
+    two_candidates(rig)
+
+    def person_box(path, start, end):
+        raise RuntimeError("CUDA error: out of memory")
+
+    monkeypatch.setattr(zoom, "person_box", person_box)
+    cuts = _spy_cut_window(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="pipeline.real"):
+        res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert [c["crop"] for c in cuts] == [None, None]
+    assert [c["coded"][1:3] for c in rig.verify_calls] == [(464, 848)] * 2  # the full frame
+    assert [e.crop for e in res.events] == [None, None]
+    assert len([r for r in caplog.records if "person box failed" in r.getMessage()]) == 2
+    assert [(e.rule_id, e.reason) for e in res.events] == [
+        ("cash_unattended", "verified"), ("personal_items_at_workplace", "rejected")]
+
+
+def test_zoom_cropped_cut_failure_cuts_uncropped(monkeypatch, tmp_path, rules, clip, caplog):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "zoom": True})
+    two_candidates(rig)
+    monkeypatch.setattr(zoom, "person_box", lambda path, start, end: (100, 200, 300, 600))
+    cuts = _spy_cut_window(monkeypatch, fail_cropped=True)
+    with caplog.at_level(logging.WARNING, logger="pipeline.real"):
+        res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert sorted(c["crop"] is None for c in cuts) == [False, False, True, True]  # each window tried cropped first
+    assert [c["coded"][1:3] for c in rig.verify_calls] == [(464, 848)] * 2
+    assert [e.crop for e in res.events] == [None, None]  # the crop that was not used is not recorded
+    assert len([r for r in caplog.records if "uncropped" in r.getMessage()]) == 2
+
+
+def test_zoom_skipped_close_to_the_deadline(monkeypatch, tmp_path, rules, clip, caplog):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "zoom": True})
+    two_candidates(rig)
+    monkeypatch.setattr(real, "POOL_SIZE", 1)  # the windows are cut one after the other
+    boxes = []
+
+    def slow_person_box(path, start, end):
+        boxes.append(start)
+        # this detection takes so long that the next window starts with too little time left
+        monkeypatch.setattr(real, "WINDOWS_MIN_LEFT_SEC", 1e9)
+        return 100, 200, 300, 600
+
+    monkeypatch.setattr(zoom, "person_box", slow_person_box)
+    with caplog.at_level(logging.WARNING, logger="pipeline.real"):
+        res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert boxes == [0.0]
+    assert [e.crop for e in res.events] == [[100, 200, 300, 600], None]
+    assert sorted(c["coded"][1:3] for c in rig.verify_calls) == [(448, 896), (464, 848)]
+    assert any("too late for the person box" in r.getMessage() for r in caplog.records)
+
+
+def multi_ids(rules):
+    return [rid for rid in detectable_ids(rules) if rid != "other"]
+
+
+def test_multi_mode_takes_max_rule_and_type(monkeypatch, tmp_path, rules, clip):
+    import api
+    from pipeline.logic import judge_candidates
+    from pipeline.types import to_debug
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "verify_mode": "multi"})
+    two_candidates(rig)  # VideoJev's best type is cash_unattended
+    first = {"cash_unattended": 0.3, "previous_cash_on_desk": 0.8, "deposit_not_counted": 0.6}
+    rig.multi = {0: (first, "Кассир отходит от стола."),
+                 1: ({"cash_unattended": 0.2, "personal_items_at_workplace": 0.1}, "Кассир работает с клиентом.")}
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert rig.verify_calls == []  # no single-mode check
+    assert sorted(c["k"] for c in rig.multi_calls) == [0, 1]
+    for c in rig.multi_calls:  # every detectable rule but other, in rules.yaml order
+        assert c["ids"] == multi_ids(rules) and 59 < c["timeout"] <= 60
+    a, b = res.events
+    assert (a.verify_score, a.kept, a.reason, a.observation) == (0.8, True, "verified", "Кассир отходит от стола.")
+    assert (b.verify_score, b.kept, b.reason, b.rule_id) == (0.2, False, "rejected", "personal_items_at_workplace")
+    assert a.p_rules == {rid: first.get(rid) for rid in multi_ids(rules)}
+    # the kept event's type is the rule answered YES most surely; without the judge it is the result's type
+    assert (a.rule_id, a.type_source, a.justification) == (
+        "previous_cash_on_desk", "fallback", rules["previous_cash_on_desk"]["why"])
+    j, = rig.judge_calls  # the top 3 rules by P(YES), then other
+    ids = [c["id"] for c in j["candidates"]]
+    assert ids == ["previous_cash_on_desk", "deposit_not_counted", "cash_unattended", "other"]
+    assert ids == judge_candidates(first, "previous_cash_on_desk")
+    v, = api.to_api("abc123def456", res, rules)["violations"]
+    assert v["type_id"] == "previous_cash_on_desk" and v["confidence"] == 0.8
+    dbg = json.loads(json.dumps(to_debug(res)))
+    p0 = dbg["events"][0]["p_rules"]
+    assert p0["previous_cash_on_desk"] == 0.8 and p0["personal_items_at_workplace"] is None
+    assert list(p0) == multi_ids(rules)
+
+
+def test_multi_mode_below_verify_keeps_the_choice_type(monkeypatch, tmp_path, rules, clip):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "verify_mode": "multi", "strong": 0.65})
+    two_candidates(rig)
+    rig.multi = {0: ({"previous_cash_on_desk": 0.4, "deposit_not_counted": 0.1}, "obs")}
+    a, _ = real.analyze(clip, time.time() + 240, lambda s: None).events
+    assert (a.verify_score, a.kept, a.reason) == (0.4, True, "strong_ground")
+    assert a.rule_id == "cash_unattended"  # no rule reached verify: VideoJev's best type, as in single mode
+
+
+def test_multi_all_none_uses_fallback(monkeypatch, tmp_path, rules, clip):
+    from pipeline.logic import judge_candidates
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "verify_mode": "multi"})
+    two_candidates(rig)  # the cells' ground scores are 0.7 and 0.4 against fallback 0.5
+    rig.multi = {}  # every answer None: the check failed
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert len(rig.multi_calls) == 2
+    a, b = res.events
+    assert (a.verify_score, a.kept, a.reason, a.rule_id) == (None, True, "fallback_no_vlm", "cash_unattended")
+    assert (b.verify_score, b.kept, b.reason) == (None, False, "rejected")
+    assert a.p_rules == dict.fromkeys(multi_ids(rules))
+    j, = rig.judge_calls  # no answer to rank by: VideoJev's types, as in single mode
+    assert [c["id"] for c in j["candidates"]] == judge_candidates(a.type_probs, "")
+
+
+def test_thresholds_without_new_keys_load_with_defaults(rig, clip, tmp_path):
+    p = tmp_path / "old.json"
+    p.write_text(json.dumps(TH_CELLS))  # written before the switches existed
+    th = real._load_thresholds(p)
+    assert (th["zoom"], th["verify_mode"]) == (False, "single")
+    assert {k: v for k, v in th.items() if k not in ("zoom", "verify_mode")} == TH_CELLS
+    p.write_text(json.dumps({**TH_CELLS, "zoom": True, "verify_mode": "multi"}))
+    th = real._load_thresholds(p)
+    assert (th["zoom"], th["verify_mode"]) == (True, "multi")
+    two_candidates(rig)  # rig runs on TH, an old file: the single-mode check and no person box
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert len(rig.verify_calls) == 2 and rig.multi_calls == [] and rig.box_calls == []
+    assert all(e.crop is None and e.p_rules is None for e in res.events)
+
+
+CITATION = {"document": "Правила осуществления кассовых операций", "clause": "п. 22",
+            "quote": "Кассовому работнику не допускается покидать рабочее место до окончания обслуживания клиента.",
+            "url": "https://adilet.zan.kz/rus/docs/V1900019680#z114"}
+
+
+def test_judge_citation_reaches_api(rig, clip, rules):
+    import api
+    two_candidates(rig)
+    good = {"rule_id": "cash_unattended", "justification": "Действия могут указывать на нарушение.",
+            "confidence": 0.7, "clause_id": "V1900019680:22", "violation": 0.9, "citation": CITATION}
+    rig.judge_answer = good
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    ev, = kept(res)
+    assert (ev.type_source, ev.judge_rule_id, ev.citation) == ("judge", "cash_unattended", CITATION)
+    v, = api.to_api("abc123def456", res, rules)["violations"]
+    assert v["type_id"] == "cash_unattended" and v["rule"] == CITATION
+    assert v["description"].endswith(f"Основание: {CITATION['document']}, {CITATION['clause']}.")
+    # a citation with an empty field, or an answer the pipeline does not accept, leaves the catalogue citation
+    for answer in ({**good, "citation": {**CITATION, "quote": " "}}, {**good, "citation": None},
+                   {**good, "rule_id": "x"}):
+        rig.judge_answer = answer
+        res = real.analyze(clip, time.time() + 240, lambda s: None)
+        ev, = kept(res)
+        assert ev.citation is None
+        v, = api.to_api("abc123def456", res, rules)["violations"]
+        c = rules[v["type_id"]]["citations"][0]
+        assert v["rule"] == {k: c.get(k, "") for k in CITATION}

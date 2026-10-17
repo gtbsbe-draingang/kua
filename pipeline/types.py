@@ -29,6 +29,9 @@ class Event:
     justification: str = ""
     type_source: str = "fallback"  # judge | fallback
     rank: int | None = None  # 0-based rank of the candidate by grounding within the clip; None = not ranked
+    crop: list[int] | None = None  # zoom: the person box [x0, y0, x1, y1] the window was cut to; None = uncropped
+    p_rules: dict[str, float | None] | None = None  # multi check: P(YES) per rule (None = no answer); None = not run
+    citation: dict | None = None  # the judge's corpus citation {document, clause, quote, url}; None = the catalogue's
 
 
 @dataclass

@@ -261,7 +261,8 @@ def test_sweep_cells_prints_the_curve_and_picks_most_found_then_fewest_fp(tmp_pa
     assert len([ln for ln in text.splitlines() if ln.split()[:1] in (["1"], ["2"])]) == 2 * 43
     assert "recall 1.0 is not reachable" in text and "X-3" in text
     th = json.loads(out.read_text())
-    assert th == {**CELLS_TH, "verify": 0.35, "top_k": 2, "strong": None}
+    # the run predates the zoom and verify_mode switches, so it ran without zoom in single mode
+    assert th == {**CELLS_TH, "verify": 0.35, "top_k": 2, "strong": None, "zoom": False, "verify_mode": "single"}
 
 
 def test_sweep_cells_events_without_rank_count_at_every_top_k(tmp_path, capsys):
@@ -275,6 +276,24 @@ def test_sweep_cells_events_without_rank_count_at_every_top_k(tmp_path, capsys):
     assert _rows(capsys.readouterr().out, 1, 0.4)[0][:5] == ["1", "0.40", "1/1", "1/1", "0/1"]
     th = json.loads(out.read_text())
     assert (th["verify"], th["top_k"]) == (0.11, 2)  # the loosest verify with fp 0; the run's top_k on a tie
+
+
+def test_sweep_writes_the_run_switches(tmp_path):
+    # verify is chosen on the run's own scores, so the zoom and verify_mode the run used go with it
+    for name, run_th, base, want in (
+            ("new", {**CELLS_TH, "zoom": True, "verify_mode": "multi"}, CELLS_TH, (True, "multi")),
+            ("old", CELLS_TH, {**CELLS_TH, "zoom": True, "verify_mode": "multi"}, (False, "single"))):
+        d = tmp_path / name
+        d.mkdir()
+        bodies = {"X-1": _cells_done(_cells_event(10, 0.6, 0)), "X-2": _cells_done(_cells_event(5, 0.1, 0))}
+        for b in bodies.values():
+            b["debug"]["versions"]["thresholds"] = json.dumps(run_th, sort_keys=True)
+        run, labels = _write_run(d, bodies)
+        out = d / "t.json"
+        out.write_text(json.dumps(base))
+        assert _sweep(run, labels, out) == 0
+        th = json.loads(out.read_text())
+        assert (th["zoom"], th["verify_mode"]) == want
 
 
 def test_sweep_refuses_a_run_with_two_generators(tmp_path):
