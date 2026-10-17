@@ -3,6 +3,7 @@ corpus out. The real app's startup runs once, with the index class and torch rep
 import json
 import subprocess
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -268,6 +269,43 @@ def test_rag_server_startup_builds_the_index_and_reads_env(monkeypatch):
         assert (r.status_code, r.json()) == (502, {"error": "bad answer"})  # "{}" names no rule
     assert sent == [("http://127.0.0.1:9/generate", 3.5)]
     assert rag_server.app.state.index is None  # released at shutdown
+
+
+def test_rag_server_spreads_llm_calls(monkeypatch):
+    urls = ["http://127.0.0.1:1/generate", "http://127.0.0.1:2/generate"]
+    seen, lock = [], threading.Lock()
+    both = threading.Barrier(2, timeout=5)  # each call holds its replica until the other has arrived
+
+    def post(url, json, timeout, trust_env):
+        with lock:
+            seen.append(url)
+        both.wait()
+        return httpx.Response(200, json={"text": answer(), "seconds": 0.1})
+
+    monkeypatch.setattr(rag_server.httpx, "post", post)
+    client = TestClient(rag_server.create_app(FakeIndex((A20, A22, B8)), rag_server.pooled_llm(urls)))
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(client.post("/v1/chat/completions", json=body())))
+               for _ in range(2)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert [r.status_code for r in results] == [200, 200]
+    assert sorted(seen) == urls
+
+
+def test_rag_server_llm_fails_over_on_connect_error(monkeypatch):
+    urls = ["http://127.0.0.1:1/generate", "http://127.0.0.1:2/generate"]
+    seen = []
+
+    def post(url, json, timeout, trust_env):
+        seen.append(url)
+        if url == urls[0]:
+            raise httpx.ConnectError("down")
+        return httpx.Response(200, json={"text": "ответ"})
+
+    monkeypatch.setattr(rag_server.httpx, "post", post)
+    assert rag_server.pooled_llm(urls)("s", "p", 10) == "ответ"
+    assert seen == urls
 
 
 # ---- the judge client against this server -------------------------------------------------
