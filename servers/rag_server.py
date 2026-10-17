@@ -16,7 +16,8 @@ How a judge request is answered:
 - Clauses: the clause of each candidate rule's catalogue quote first, then the top 8 clauses
   retrieved for the observation (none for an empty observation), each once
   (matcher.clause_candidates). Retrieved clauses are dropped from the end while the prompt
-  is over the /generate limit (matcher.fit_clauses).
+  is over the /generate limit (matcher.fit_clauses). matcher.judge_prompt runs both and
+  builds the prompt; tools/rag_eval.py calls the same function.
 - The LLM (by default InternVideo3's text-only POST /generate at RAG_LLM_URL, with a
   timeout of RAG_LLM_TIMEOUT seconds) picks the rule, the clause or none, and P(violation)
   from matcher.build_prompt. matcher.parse_answer reads its JSON.
@@ -134,9 +135,7 @@ def create_app(index=None, llm: LLM | None = None, llm_timeout: float = LLM_TIME
         if not rule_ids:
             return bad("no candidate rules")
         hits = index.search(observation) if observation.strip() else []
-        clauses = matcher.clause_candidates(hits, candidates, index)
-        clauses = matcher.fit_clauses(observation, candidates, clauses)
-        system, prompt = matcher.build_prompt(observation, candidates, clauses)
+        system, prompt, clauses = matcher.judge_prompt(observation, candidates, hits, index)
         clause_ids = [c.id for c, _ in clauses]
         t1 = time.perf_counter()
         try:

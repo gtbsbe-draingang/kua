@@ -150,3 +150,80 @@ def test_operating_points_cap_events_per_clip_and_score_verdicts():
     one, six = vc.operating_points(rows, labels, [0.2], [1, 6])
     assert (one["verdict_recall"], one["found"], one["fp"], one["acc"], one["events"]) == (1, 0, 1, 0.5, 1.0)
     assert (six["found"], six["events"]) == (1, 1.5)
+
+
+def _labels(**clips):
+    """X-n=[t_labels] (a violation clip) or X-n=[] (a clean clip)."""
+    return {c: {"has_violation": int(bool(ts)), "truth": [{"t_label": t} for t in ts]} for c, ts in clips.items()}
+
+
+def test_shuffle_null_matches_coverage_when_scores_constant():
+    import verify_candidates as vc
+
+    # X-1's label is covered by a window, X-2's is not (no timecode within 2 s), X-3 is clean
+    labels = {"X-1": {"has_violation": 1, "truth": [{"t_label": 10.0}]},
+              "X-2": {"has_violation": 1, "truth": [{"t_label": 30.0}]},
+              "X-3": {"has_violation": 0, "truth": []}}
+    rows = [{"clip": "X-1", "timecode": 2.0, "p_yes": 0.4}, {"clip": "X-1", "timecode": 10.0, "p_yes": 0.4},
+            {"clip": "X-1", "timecode": 18.0, "p_yes": 0.4}, {"clip": "X-2", "timecode": 2.0, "p_yes": 0.4},
+            {"clip": "X-2", "timecode": 6.0, "p_yes": 0.4}, {"clip": "X-3", "timecode": 2.0, "p_yes": 0.4}]
+
+    def found(rs):
+        return vc.operating_points(rs, labels, [0.1], [None])[0]["found"]
+
+    assert found(rows) == 1  # the coverage: every window kept, X-1 found, X-2 not
+    for mode in ("within", "global"):
+        mean, sd = vc.shuffle_null(rows, found, mode, reps=50, seed=3)
+        assert (mean, sd) == (1.0, 0.0)
+    # with real scores the within-clip shuffle moves found at m = 1, but keeps it at m = all
+    rows[1]["p_yes"], rows[0]["p_yes"] = 0.9, 0.1
+    m1 = vc.shuffle_null(rows, lambda rs: vc.operating_points(rs, labels, [0.05], [1])[0]["found"], "within",
+                         reps=600, seed=1)
+    assert vc.operating_points(rows, labels, [0.05], [1])[0]["found"] == 1 and 0.2 < m1[0] < 0.47
+    assert vc.shuffle_null(rows, found, "within", reps=50, seed=2) == (1.0, 0.0)
+
+
+def test_shuffle_null_global_moves_scores_between_clips():
+    import verify_candidates as vc
+
+    labels = _labels(**{"X-1": [5.0], "X-2": []})
+    rows = [{"clip": "X-1", "timecode": 5.0, "p_yes": 0.9}, {"clip": "X-2", "timecode": 5.0, "p_yes": 0.1},
+            {"clip": "X-2", "timecode": 9.0, "p_yes": 0.2}]
+    assert vc.clip_auc(rows, labels) == 1.0
+    within = vc.shuffle_null(rows, lambda rs: vc.clip_auc(rs, labels), "within", reps=40, seed=0)
+    assert within == (1.0, 0.0)  # the clip max never changes under a within-clip shuffle
+    mean, sd = vc.shuffle_null(rows, lambda rs: vc.clip_auc(rs, labels), "global", reps=3000, seed=0)
+    assert abs(mean - 1 / 3) < 0.03 and sd > 0.4  # X-1 holds the top score 1 time in 3
+    # rows without a score take no part
+    rows.append({"clip": "X-1", "timecode": 9.0, "p_yes": None})
+    assert vc.shuffle_null(rows, lambda rs: len([r for r in rs if r["p_yes"] is None]), "global", reps=5) == (0, 0)
+
+
+def test_clip_auc_counts_clip_max():
+    import verify_candidates as vc
+
+    labels = _labels(**{"X-1": [3.0], "X-2": [4.0], "X-3": []})
+    rows = [{"clip": "X-1", "timecode": 2.0, "p_yes": 0.1}, {"clip": "X-1", "timecode": 6.0, "p_yes": 0.9},
+            {"clip": "X-2", "timecode": 2.0, "p_yes": 0.6},
+            {"clip": "X-3", "timecode": 2.0, "p_yes": 0.7}, {"clip": "X-3", "timecode": 6.0, "p_yes": 0.0}]
+    # max: 0.9 and 0.6 against 0.7 -> 0.5 (by the mean it would be 1.0, by the first window 0.0)
+    assert vc.clip_auc(rows, labels) == 0.5
+    assert vc.clip_scores(rows) == {"X-1": 0.9, "X-2": 0.6, "X-3": 0.7}
+    rows[0]["score"] = 1.0
+    assert vc.clip_scores(rows, key="score") == {"X-1": 1.0}  # another key; rows without it are left out
+    # the window AUC: label-matched windows (+-2 s) against windows of clean clips
+    assert vc.window_auc(rows, labels) == pytest.approx(((0.1 > 0.7) + (0.1 > 0.0) + (0.6 > 0.7) + (0.6 > 0.0)) / 4)
+
+
+def test_operating_points_two_label_clip_needs_both():
+    import verify_candidates as vc
+
+    labels = _labels(**{"X-4": [57.0, 68.0], "X-5": [10.0, 40.0], "X-6": []})
+    rows = [{"clip": "X-4", "timecode": 30.0, "p_yes": 0.95}, {"clip": "X-4", "timecode": 58.0, "p_yes": 0.9},
+            {"clip": "X-4", "timecode": 66.0, "p_yes": 0.8},
+            {"clip": "X-5", "timecode": 10.0, "p_yes": 0.7}, {"clip": "X-5", "timecode": 25.0, "p_yes": 0.6},
+            {"clip": "X-6", "timecode": 3.0, "p_yes": 0.2}]
+    one, two, every = vc.operating_points(rows, labels, [0.5], [1, 2, None])
+    assert (one["found"], two["found"], every["found"]) == (0, 0, 1)  # X-4 needs both labels; X-5 never has both
+    assert (every["verdict_recall"], every["fp"], every["acc"], every["m"]) == (2, 0, 1.0, None)
+    assert vc.operating_points(rows, labels, [0.85], [None])[0]["found"] == 0  # 66 s dropped by v
