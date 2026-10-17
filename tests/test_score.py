@@ -97,20 +97,108 @@ def _dbg_event(t, ground, verify):
             "type_probs": {}, "verify_score": verify, "kept": False, "reason": "x", "evidence": []}
 
 
-def test_sweep_selection(tmp_path):
-    logic = pytest.importorskip("pipeline.logic")
+def ref_keep(ground, verify, vlm_ok, th):
+    if vlm_ok and verify is not None and verify >= th["verify"]:
+        return True, "verified"
+    if ground >= th["strong"]:
+        return True, "strong_ground"
+    if not vlm_ok and ground >= th["fallback"]:
+        return True, "fallback_no_vlm"
+    return False, "rejected"
+
+
+HDR = "clip,has_violation,t_label,t_start,t_end,type_id,angle,source,note\n"
+
+
+def _write_run(tmp_path, clips, extra_rows=""):
     run = tmp_path / "run"; run.mkdir()
     labels = tmp_path / "l.csv"
-    labels.write_text("clip,has_violation,t_label,t_start,t_end,type_id,angle,source,note\n"
-                      "X-1,1,10,,,,main,given,\nX-2,0,,,,,main,given,\n")
-    (run / "X-1.json").write_text(json.dumps({"status": "done", "verdict": "violation", "violations": [],
-        "debug": {"events": [_dbg_event(10, 0.6, 0.7)]}}))
-    (run / "X-2.json").write_text(json.dumps({"status": "done", "verdict": "no_violation", "violations": [],
-        "debug": {"events": [_dbg_event(5, 0.3, 0.2)]}}))
+    labels.write_text(HDR + "X-1,1,10,,,,main,given,\nX-2,0,,,,,main,given,\n" + extra_rows)
+    for name, body in clips.items():
+        (run / f"{name}.json").write_text(json.dumps(body))
+    return run, labels
+
+
+def _done(*events):
+    return {"status": "done", "verdict": "x", "violations": [], "debug": {"events": list(events)}}
+
+
+def test_sweep_selection(tmp_path, capsys):
+    run, labels = _write_run(tmp_path, {
+        "X-1": _done(_dbg_event(10, 0.6, 0.7)),
+        "X-2": _done(_dbg_event(5, 0.3, 0.2)),
+    })
     out = tmp_path / "t.json"
     out.write_text(json.dumps({"cand": 0.25, "verify": 0.5, "strong": 0.8, "fallback": 0.5, "top_k": 6}))
-    assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)]) == 0
+    rc = ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=ref_keep)
+    assert rc == 0
     th = json.loads(out.read_text())
+    # fp 0 needs verify > 0.2 and strong > 0.3; ties: lowest cand 0.05, lowest verify 0.25,
+    # highest strong 0.95, lowest fallback 0.05. Loosening: cand stays at the 0.05 floor, verify 0.2.
+    assert (th["cand"], th["verify"], th["strong"], th["fallback"]) == (0.05, 0.2, 0.95, 0.05)
     assert th["top_k"] == 6
-    # the clean clip's event (ground 0.3) must stay out: cand >0.3 before loosening -> chosen cand 0.35, loosened to 0.30
-    assert th["cand"] <= 0.6 and th["verify"] <= 0.7
+    text = capsys.readouterr().out
+    assert "chosen: cand=0.05 verify=0.25 strong=0.95 fallback=0.05  recall=1.000 fp_clips=0" in text
+    assert "loosened: cand=0.05 verify=0.2  recall=1.000 fp_clips=1" in text
+
+
+def test_sweep_cand_excludes_clean_event(tmp_path):
+    # the clean event passes every verify setting, so only cand can exclude it (cand 0.35 > 0.3):
+    # chosen cand 0.35, verify 0.05 (lowest on ties); loosened cand 0.3, verify stays at the 0.05 floor
+    run, labels = _write_run(tmp_path, {
+        "X-1": _done(_dbg_event(10, 0.6, 0.9)),
+        "X-2": _done(_dbg_event(5, 0.3, 0.95)),
+    })
+    out = tmp_path / "t.json"
+    assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=ref_keep) == 0
+    th = json.loads(out.read_text())
+    assert (th["cand"], th["verify"]) == (0.3, 0.05)
+
+
+def test_sweep_failed_violation_clip_blocks(tmp_path, capsys):
+    run, labels = _write_run(tmp_path, {
+        "X-1": {"status": "failed", "error": "x"},
+        "X-2": _done(_dbg_event(5, 0.3, 0.2)),
+    })
+    out = tmp_path / "t.json"
+    assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=ref_keep) == 1
+    assert not out.exists()
+    assert "X-1" in capsys.readouterr().out
+
+
+def test_sweep_absent_violation_clip_blocks(tmp_path):
+    run, labels = _write_run(tmp_path, {"X-2": _done(_dbg_event(5, 0.3, 0.2))})
+    out = tmp_path / "t.json"
+    assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=ref_keep) == 1
+    assert not out.exists()
+
+
+def test_sweep_with_real_logic(tmp_path):
+    pytest.importorskip("pipeline.logic")
+    run, labels = _write_run(tmp_path, {
+        "X-1": _done(_dbg_event(10, 0.6, 0.7)), "X-2": _done(_dbg_event(5, 0.3, 0.2))})
+    out = tmp_path / "t.json"
+    assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)]) == 0
+
+
+def test_summary_counts_failed_and_missing():
+    recs = [
+        _rec("X-1", 1, [{"t_label": 22, "type_id": ""}], [{"timecode_sec": 22}], "violation"),
+        make_record("X-2", 1, [{"t_label": 10, "type_id": ""}], [], None, "timeout", 330.0, []),
+        make_record("X-3", 1, [{"t_label": 10, "type_id": ""}], [], None, "missing", None, []),
+        _rec("X-4", 0, [], [], "no_violation"),
+    ]
+    s = summarize(recs)
+    assert s["recall_clips"] == pytest.approx(1 / 3)
+    assert s["verdict_acc"] == 0.5
+    assert s["failed_clips"] == ["X-2"] and s["missing_clips"] == ["X-3"]
+    assert s["max_latency_s"] == 330.0
+
+
+def test_malformed_timecode_does_not_crash():
+    body = {"status": "done", "verdict": "violation",
+            "violations": [{"timecode_sec": None}, {"timecode_sec": 3.0, "type_id": "other"}],
+            "debug": {"events": [{"kept": True, "timecode": None}]}}
+    pred = ev._pred_from_body(body)
+    assert [p["timecode_sec"] for p in pred] == [3.0]
+    assert match_events([{"timecode_sec": None}, {"timecode_sec": "x"}], [{"t_label": 3}]) == []

@@ -6,6 +6,10 @@ import binascii
 import statistics
 
 
+def _num(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and x == x
+
+
 def match_events(pred: list[dict], truth: list[dict], tol: float = 2.0) -> list[tuple]:
     """One-to-one greedy matching by smallest absolute time error (<= tol).
 
@@ -14,6 +18,7 @@ def match_events(pred: list[dict], truth: list[dict], tol: float = 2.0) -> list[
     pairs = sorted(
         (abs(float(p["timecode_sec"]) - float(t["t_label"])), i, j)
         for i, p in enumerate(pred) for j, t in enumerate(truth)
+        if _num(p.get("timecode_sec"))
     )
     used_p, used_t, out = set(), set(), []
     for err, i, j in pairs:
@@ -86,8 +91,9 @@ def summarize(per_clip: list[dict]) -> dict:
     viol = [r for r in per_clip if r["has_violation"]]
     clean = [r for r in per_clip if not r["has_violation"]]
     found = sum(1 for r in viol if clip_found(1, r["truth"], r["pred"], r["verdict"]))
-    done = [r for r in per_clip if r["status"] == "done"]
-    ok = sum(1 for r in done if r["verdict"] == ("violation" if r["has_violation"] else "no_violation"))
+    # failed, timed-out and missing clips have no verdict, so they count as wrong
+    ok = sum(1 for r in per_clip
+             if r["status"] == "done" and r["verdict"] == ("violation" if r["has_violation"] else "no_violation"))
     errors, n_truth, typed, type_ok, type_ok_nj = [], 0, 0, 0, 0
     for r in per_clip:
         n_truth += len(r["truth"])
@@ -103,7 +109,7 @@ def summarize(per_clip: list[dict]) -> dict:
         "n_clips": len(per_clip),
         "recall_clips": _share(found, len(viol)),
         "fp_clips": sum(1 for r in clean if r["status"] == "done" and r["verdict"] == "violation"),
-        "verdict_acc": _share(ok, len(done)),
+        "verdict_acc": _share(ok, len(per_clip)),
         "tc_median": statistics.median(errors) if errors else None,
         "tc_max": max(errors) if errors else None,
         "tc_within_1s": _share(sum(e <= 1.0 for e in errors), n_truth),
@@ -112,5 +118,6 @@ def summarize(per_clip: list[dict]) -> dict:
         "type_acc_no_judge": _share(type_ok_nj, typed),
         "max_latency_s": max(lat) if lat else None,
         "schema_errors": [f"{r['clip']}: {e}" for r in per_clip for e in r.get("schema_errors", [])],
-        "failed_clips": [r["clip"] for r in per_clip if r["status"] != "done"],
+        "failed_clips": [r["clip"] for r in per_clip if r["status"] not in ("done", "missing")],
+        "missing_clips": [r["clip"] for r in per_clip if r["status"] == "missing"],
     }
