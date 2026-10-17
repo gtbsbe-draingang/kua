@@ -73,18 +73,17 @@ loop_pid() {
   echo "$pid"
 }
 
-# The pid of whichever loop holds the lock, draining or not.
-lock_holder() {
+# Pids of our loops that have the lock file open on fd 9: the holder, plus any
+# loop still waiting for it (and a loop's short-lived forks).
+lock_openers() {
   local fd pid
   for fd in /proc/[0-9]*/fd/9; do
-    [ "$(readlink "$fd" 2>/dev/null)" = "$LOCK" ] || continue
+    [ "$fd" -ef "$LOCK" ] || continue
     pid=${fd#/proc/}
     pid=${pid%%/*}
     tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF "$SELF _loop" || continue
     echo "$pid"
-    return 0
   done
-  return 1
 }
 
 # Agents of our own binary, supervised or not.
@@ -183,6 +182,7 @@ _loop() {
 wait_online() {
   local secs=$1 i
   [[ $secs =~ ^[0-9]+$ ]] || die "wait: seconds must be a whole number, got '$secs'"
+  secs=$((10#$secs))   # "08" is not octal
   for (( i = 0; i <= secs; i++ )); do
     if [ "$(endpoint || true)" = "$PUBLIC_URL" ]; then
       echo "online: $PUBLIC_URL"
@@ -203,9 +203,9 @@ stop() {
   reap_agents
   # The loop exits as soon as its agent is gone and releases the lock.
   if ! flock -w 10 "$LOCK" true; then
-    if pid=$(lock_holder); then
+    for pid in $(lock_openers); do
       kill -KILL "$pid" 2>/dev/null || true
-    fi
+    done
     reap_agents
     flock -w 5 "$LOCK" true || die "a loop still holds $LOCK"
   fi
