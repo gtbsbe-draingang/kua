@@ -51,17 +51,26 @@ def test_catalogue_loads_strict():
 
 
 # "left" is also the past tense of "leave" ("cash is left unattended"), which describes an
-# action, not a place. It counts as a position only in a spatial phrase ("on the left",
-# "left side", "left of the desk").
+# action, not a place. Every other use of "left" is treated as a screen position, so a
+# spatial "left side" or "on the left" fails. Only these verb phrases are allowed.
 POSITION_WORDS = re.compile(
-    r"\b(right|top|bottom|upper|lower|corner|foreground|background)\b"
-    r"|\b(the|on|to|at|from|in|far|bottom|top|upper|lower)\s+left\b"
-    r"|\bleft[\s-]+(side|hand|of|part|half|edge|window|portion|third)\b",
+    r"\b(right|top|bottom|upper|lower|corner|foreground|background)\b", re.I)
+LEFT = re.compile(r"\bleft\b", re.I)
+LEFT_VERB_PHRASES = re.compile(
+    r"\b(cashier|client|customer|person|he|she|they|has|have|had)\s+left\b"
+    r"|\b(?!(?:the|on|to|at|from|in|far)\b)\w+\s+left\s+"
+    r"(open|unattended|unlocked|lying|waiting|out|in|on|without|alone|behind|visible)\b",
     re.I)
+
+
+def left_positions(text):
+    """Occurrences of "left" that are not one of the allowed verb phrases."""
+    return LEFT.findall(LEFT_VERB_PHRASES.sub(" ", text))
 
 
 def _prompt_strings(r):
     out = list(r.get("grounding_queries") or []) + list(r.get("visual_criteria") or [])
+    out += list(r.get("never_claim") or [])
     out += [r.get("choice_option") or "", r.get("verify_prompt") or ""]
     return out
 
@@ -71,6 +80,31 @@ def test_queries_have_no_screen_positions():
         for text in _prompt_strings(r):
             m = POSITION_WORDS.search(str(text))
             assert not m, f"{rid}: {m.group(0)!r} in {text!r}"
+            assert not left_positions(str(text)), f"{rid}: positional 'left' in {text!r}"
+
+
+@pytest.mark.parametrize("text", ["on the left", "left side of the desk", "the left window",
+                                  "left of the cashier", "cashier at far left"])
+def test_left_guard_rejects_spatial_use(text):
+    assert left_positions(text)
+
+
+@pytest.mark.parametrize("text", ["the cashier left", "safe left open", "keys left in the lock",
+                                  "after the client has left", "cash is left unattended"])
+def test_left_guard_allows_verb_use(text):
+    assert not left_positions(text)
+
+
+def test_detectable_why_is_hedged():
+    for rid, r in load_rules(ROOT / "rules.yaml", strict=True).items():
+        if r.get("detectable"):
+            assert "может" in r["why"], f"{rid}: why must be hedged with 'может'"
+
+
+def test_undetectable_rules_state_a_limitation():
+    for rid, r in load_rules(ROOT / "rules.yaml", strict=True).items():
+        if not r.get("detectable"):
+            assert str(r.get("limitation") or "").strip(), f"{rid}: empty limitation"
 
 
 def test_every_seen_rule_has_a_clip():
