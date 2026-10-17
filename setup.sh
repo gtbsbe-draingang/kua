@@ -244,11 +244,11 @@ build_main() {
     "flash-attn @ $FA_REL/$fa" "causal-conv1d @ $CC_REL/$cc" \
     transformers==5.14.1 accelerate safetensors numpy pillow av==18.1.0 \
     flash-linear-attention==0.4.2 fla-core==0.4.2 \
-    fastapi uvicorn python-multipart pyyaml httpx openpyxl
+    fastapi uvicorn python-multipart pyyaml httpx openpyxl "snowballstemmer>=3.1.1"
   freeze main
   check main '
 import torch, torchvision, transformers, accelerate, safetensors, numpy, PIL, av
-import flash_attn, causal_conv1d, fla, fastapi, uvicorn, multipart, yaml, httpx, openpyxl
+import flash_attn, causal_conv1d, fla, fastapi, uvicorn, multipart, yaml, httpx, openpyxl, snowballstemmer
 import flash_attn_2_cuda, causal_conv1d_cuda          # the compiled extensions load
 from flash_attn import flash_attn_varlen_func
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -262,6 +262,7 @@ print("flash_attn", flash_attn.__version__, "| causal_conv1d", causal_conv1d.__v
 print("flash-linear-attention", v("flash-linear-attention"), "| fla-core", v("fla-core"), "| av", av.__version__)
 print("numpy", numpy.__version__, "| pillow", PIL.__version__, "| safetensors", safetensors.__version__)
 print("fastapi", fastapi.__version__, "| uvicorn", uvicorn.__version__, "| python-multipart", v("python-multipart"), "| pyyaml", yaml.__version__, "| httpx", httpx.__version__)
+print("snowballstemmer", v("snowballstemmer"), "| lexical retrieval of the RAG server")
 '
 }
 

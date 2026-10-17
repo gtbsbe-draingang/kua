@@ -1,6 +1,7 @@
 """The RAG server with a fake index and a fake LLM: a judge request in, a rule, a clause and a citation from the
 corpus out. The real app's startup runs once, with the index class and torch replaced."""
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -48,6 +49,8 @@ HITS = (Hit("V2:8", 0.91, 1), Hit("V1:20", 0.8, 0))
 
 
 class FakeIndex:
+    hybrid = True  # rag.retrieve.Index.hybrid: the lexical channel is in use
+
     def __init__(self, clauses, hits=HITS):
         self.clauses = list(clauses)
         self.by_id = {c.id: c for c in self.clauses}
@@ -206,10 +209,42 @@ def test_rag_server_retrieve(make):
 
 def test_rag_server_healthz(make):
     client, _, _ = make("")
-    assert client.get("/healthz").json() == {"ok": True, "clauses": 3, "passages": 5}
+    assert client.get("/healthz").json() == {"ok": True, "clauses": 3, "passages": 5, "llm": "iv3",
+                                             "retrieval": "hybrid"}
+
+
+def test_rag_server_healthz_says_what_is_serving():
+    index = FakeIndex((A20, A22, B8))
+    index.hybrid = False  # dense only: RAG_HYBRID=0, or the lexical channel could not be built
+    client = TestClient(rag_server.create_app(index, FakeLLM(""), backend="openai qwen3.5-9b",
+                                              model_label="rag+qwen3.5-9b"))
+    d = client.get("/healthz").json()
+    assert (d["llm"], d["retrieval"]) == ("openai qwen3.5-9b", "dense")
+    index.hybrid = True  # read from the index on every call (tools flip it to compare the two modes)
+    assert client.get("/healthz").json()["retrieval"] == "hybrid"
 
 
 # ---- the real app: import, startup, LLM client ---------------------------------------------
+
+ENV_READ = re.compile(r"""(?:environ(?:\.get|\.setdefault|\.pop)?\s*[(\[]|getenv\s*\()\s*["'](RAG_[A-Z0-9_]+)["']""")
+
+
+def test_env_read_pattern_sees_every_way_of_reading_a_variable():
+    src = ('os.environ.get("RAG_A"); os.environ["RAG_B"]; os.getenv("RAG_C", "x"); environ.get( "RAG_D" ); '
+           "os.environ.setdefault('RAG_E', '1'); os.environ.pop(\"RAG_F\", None); os.environ.get(\"OTHER_G\")")
+    assert sorted(ENV_READ.findall(src)) == ["RAG_A", "RAG_B", "RAG_C", "RAG_D", "RAG_E", "RAG_F"]
+
+
+def test_header_documents_every_rag_environment_variable():
+    """The module header is the one place that lists the RAG_* switches; one the code reads must be in it, as a whole
+    word (RAG_LLM_URL is not RAG_LLM_URLS)."""
+    names = set()
+    for module in ("servers/rag_server.py", "rag/retrieve.py"):
+        names |= set(ENV_READ.findall((ROOT / module).read_text()))
+    assert {"RAG_LLM_KIND", "RAG_LLM_MODEL", "RAG_HYBRID", "RAG_LLM_URL", "RAG_LLM_URLS"} <= names
+    assert [n for n in sorted(names) if not re.search(rf"\b{n}\b", rag_server.__doc__)] == []
+    assert not re.search(r"\bRAG_LLM_URL\b", "RAG_LLM_URLS only")  # the boundary does what the test relies on
+
 
 def test_rag_server_imports_without_torch():
     code = ("import sys; import servers.rag_server as s; "
@@ -248,6 +283,8 @@ def test_rag_server_startup_builds_the_index_and_reads_env(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", torch)
 
     class Index:
+        hybrid = False
+
         def __init__(self, clauses):
             built.append(len(clauses))
             self.clauses, self.by_id = list(clauses), {c.id: c for c in clauses}
@@ -263,7 +300,7 @@ def test_rag_server_startup_builds_the_index_and_reads_env(monkeypatch):
     n = len(corpus.load_clauses())
     with TestClient(rag_server.app) as client:
         assert threads == [4] and built == [n]
-        assert client.get("/healthz").json() == {"ok": True, "clauses": n,
+        assert client.get("/healthz").json() == {"ok": True, "clauses": n, "llm": "iv3", "retrieval": "dense",
                                                  "passages": len(corpus.passages(corpus.load_clauses()))}
         r = client.post("/v1/chat/completions", json=body("", CANDS[-1:]))
         assert (r.status_code, r.json()) == (502, {"error": "bad answer"})  # "{}" names no rule

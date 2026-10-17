@@ -1,9 +1,11 @@
-"""Regulation matcher server (the pipeline's judge). Runs in env/main, from svc/:
+"""Regulation matcher server (the pipeline's judge). Runs in env/main, from svc/ (tools/rag_server.sh starts it):
 
     env/main/bin/python -m uvicorn servers.rag_server:app --host 127.0.0.1 --port 30001
 
-GET  /healthz -> {"ok": true, "clauses": n, "passages": m}. The port opens only after every
-     in-force clause has been embedded, so a reachable /healthz means ready.
+GET  /healthz -> {"ok": true, "clauses": n, "passages": m, "llm": "iv3" | "openai <model>",
+                  "retrieval": "hybrid" | "dense"}: what is really serving (the LLM backend RAG_LLM_KIND picked, the
+     retrieval mode the index is in now). The port opens only after every in-force clause has been embedded, so a
+     reachable /healthz means ready.
 POST /v1/chat/completions with a clients.judge_request body (the frames are not used)
      -> {"model": "rag+iv3" ("rag+<RAG_LLM_MODEL>" with RAG_LLM_KIND=openai),
          "choices": [{"message": {"role": "assistant", "content": <JSON>}}]}
@@ -13,6 +15,22 @@ POST /v1/chat/completions with a clients.judge_request body (the frames are not 
 POST /retrieve {"texts": [str], "k": 1-20 (8)} -> {"hits": [[{"clause_id", "score", "part"}]]},
      one list per text, for measurement.
 
+Environment, read once at startup:
+  RAG_LLM_KIND     the LLM backend: iv3 (default) or openai. Any other value stops the startup.
+                     iv3     InternVideo3's text-only POST /generate;
+                     openai  an OpenAI-style POST /v1/chat/completions (the Qwen3.5-9B judge on SGLang,
+                             tools/judge_llm.sh), thinking off, any <think> block cut from the reply.
+  RAG_LLM_MODEL    openai only: the model name sent in each request and shown by /healthz and in the response's
+                   "model" (default qwen3.5-9b, the name tools/judge_llm.sh serves it under).
+  RAG_LLM_URLS     comma-separated URLs of identical LLM servers, spread by least requests in flight;
+  RAG_LLM_URL      one URL, used when RAG_LLM_URLS is empty. Default: http://127.0.0.1:30000/generate for iv3,
+                   http://127.0.0.1:30005/v1/chat/completions for openai.
+  RAG_LLM_TIMEOUT  seconds one LLM call may take (default 25).
+  RAG_HYBRID       retrieval mode, read by rag.retrieve when the index is built: unset or 1 (default) fuses a BM25 +
+                   glossary search over the same passages into the dense bge-m3 search (reciprocal rank fusion);
+                   0, false, no or off searches dense only. If the lexical side cannot be built (snowballstemmer
+                   missing from the environment) the server logs a warning and serves dense only: /healthz says so.
+
 How a judge request is answered:
 - Clauses: the clause of each candidate rule's catalogue quote first, then the top 8 clauses
   retrieved for the observation (none for an empty observation), each once
@@ -20,13 +38,7 @@ How a judge request is answered:
   is over the /generate limit (matcher.fit_clauses). matcher.judge_prompt runs both and
   builds the prompt; tools/rag_eval.py calls the same function.
 - The LLM picks the rule, the clause or none, and P(violation) from matcher.build_prompt;
-  matcher.parse_answer reads its JSON. RAG_LLM_KIND selects the backend:
-    iv3 (default)  InternVideo3's text-only POST /generate, at RAG_LLM_URL (default port 30000) or spread
-                   over the comma-separated RAG_LLM_URLS;
-    openai         an OpenAI-style POST /v1/chat/completions (the Qwen3.5-9B judge on SGLang, tools/judge_llm.sh,
-                   default http://127.0.0.1:30005/v1/chat/completions) for the model named by RAG_LLM_MODEL
-                   (default qwen3.5-9b), thinking off, any <think> block cut from the reply;
-  both with a timeout of RAG_LLM_TIMEOUT seconds. An unknown kind stops the startup.
+  matcher.parse_answer reads its JSON.
 - The model never writes the citation. For the chosen clause the server takes the act's
   document, "п. <num>" and the url from the corpus, and as the quote the clause part the
   retrieval hit on, or else the catalogue quote that brought the clause in (the chosen
@@ -175,13 +187,20 @@ def llm_label(kind: str, model: str) -> str:
     return f"rag+{model}" if kind == "openai" else MODEL
 
 
+def llm_name(kind: str, model: str) -> str:
+    """The backend as /healthz and the startup log say it: iv3, or openai <served model name> (iv3 has no model name
+    to choose, so RAG_LLM_MODEL is not part of it)."""
+    return f"{kind} {model}" if kind == "openai" else kind
+
+
 def create_app(index=None, llm: LLM | None = None, llm_timeout: float = LLM_TIMEOUT, lifespan=None,
-               model_label: str = MODEL) -> FastAPI:
-    """The server over index (rag.retrieve.Index or anything with .clauses, .by_id, .search and .search_many) and
-    llm, answering with "model": model_label. The module's app passes none of these and fills them in its lifespan."""
+               model_label: str = MODEL, backend: str = LLM_KIND) -> FastAPI:
+    """The server over index (rag.retrieve.Index or anything with .clauses, .by_id, .hybrid, .search and
+    .search_many) and llm, answering with "model": model_label and reporting backend (what llm_name returns)
+    on /healthz. The module's app passes none of these and fills them in its lifespan."""
     app = FastAPI(title="rag", lifespan=lifespan)
     app.state.index, app.state.llm, app.state.llm_timeout = index, llm, llm_timeout
-    app.state.model_label = model_label
+    app.state.model_label, app.state.backend = model_label, backend
 
     def bad(message: str) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": f"bad request: {message}"})
@@ -193,7 +212,8 @@ def create_app(index=None, llm: LLM | None = None, llm_timeout: float = LLM_TIME
     @app.get("/healthz")
     def healthz():
         index = app.state.index
-        return {"ok": True, "clauses": len(index.clauses), "passages": len(passages(index.clauses))}
+        return {"ok": True, "clauses": len(index.clauses), "passages": len(passages(index.clauses)),
+                "llm": app.state.backend, "retrieval": "hybrid" if index.hybrid else "dense"}
 
     @app.post("/v1/chat/completions")
     def chat_completions(body: dict):
@@ -254,10 +274,9 @@ async def lifespan(app: FastAPI):
     urls = replicas.parse_urls(os.environ.get("RAG_LLM_URLS"),
                                os.environ.get("RAG_LLM_URL", CHAT_URL if kind == "openai" else LLM_URL))
     app.state.llm = make_llm(kind, urls, model)
-    app.state.model_label = llm_label(kind, model)
+    app.state.model_label, app.state.backend = llm_label(kind, model), llm_name(kind, model)
     app.state.llm_timeout = float(os.environ.get("RAG_LLM_TIMEOUT", LLM_TIMEOUT))
-    log.info("LLM %s%s at %s, timeout %.0f s", kind, f" {model}" if kind == "openai" else "", ", ".join(urls),
-             app.state.llm_timeout)
+    log.info("LLM %s at %s, timeout %.0f s", app.state.backend, ", ".join(urls), app.state.llm_timeout)
     yield
     app.state.index = app.state.llm = None
 

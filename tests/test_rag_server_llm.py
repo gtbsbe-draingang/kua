@@ -141,6 +141,7 @@ def test_make_llm_selects_by_kind(posts):
 class OneClauseIndex:
     clauses = [CLAUSE]
     by_id = {CLAUSE.id: CLAUSE}
+    hybrid = True
 
     def search(self, text, k=8):
         return [Hit("V2:8", 0.9, 0)]
@@ -174,6 +175,16 @@ def test_response_model_label_is_the_apps_label(posts):
     assert default.post("/v1/chat/completions", json=judge_body()).json()["model"] == "rag+iv3"
     labelled = TestClient(rag_server.create_app(OneClauseIndex(), llm, model_label="rag+m"))
     assert labelled.post("/v1/chat/completions", json=judge_body()).json()["model"] == "rag+m"
+
+
+@pytest.mark.parametrize("kind, model, name, label", [
+    ("iv3", "qwen3.5-9b", "iv3", "rag+iv3"),  # the model name belongs to the openai backend only
+    ("openai", "qwen3.5-9b", "openai qwen3.5-9b", "rag+qwen3.5-9b"),
+    ("openai", "other-model", "openai other-model", "rag+other-model"),
+])
+def test_llm_name_and_label_say_which_backend_answers(kind, model, name, label):
+    assert rag_server.llm_name(kind, model) == name
+    assert rag_server.llm_label(kind, model) == label
 
 
 def test_rag_server_openai_failures_are_a_502(posts):
@@ -251,6 +262,8 @@ def test_startup_defaults_to_the_generate_backend(started, posts):
     with TestClient(rag_server.app) as client:
         r = judge_once(client)
         assert r.status_code == 200 and r.json()["model"] == "rag+iv3"
+        assert client.get("/healthz").json() == {"ok": True, "clauses": 1, "passages": 1, "llm": "iv3",
+                                                 "retrieval": "hybrid"}
     url, sent, _, _ = posts.sent[0]
     assert url == "http://127.0.0.1:30000/generate" and sent.keys() == {"system", "prompt", "max_new_tokens"}
 
@@ -261,6 +274,7 @@ def test_startup_openai_kind(started, posts):
     with TestClient(rag_server.app) as client:
         r = judge_once(client)
         assert r.status_code == 200 and r.json()["model"] == "rag+qwen3.5-9b"  # labelled by the backend's model
+        assert client.get("/healthz").json()["llm"] == "openai qwen3.5-9b"
     url, sent, _, _ = posts.sent[0]
     assert url == CHAT_URL  # the judge LLM's own address is the default for this kind
     assert sent["model"] == "qwen3.5-9b" and "messages" in sent
@@ -274,6 +288,7 @@ def test_startup_openai_kind_reads_model_and_urls(started, posts):
     with TestClient(rag_server.app) as client:
         r = judge_once(client)
         assert r.status_code == 200 and r.json()["model"] == "rag+other-model"
+        assert client.get("/healthz").json()["llm"] == "openai other-model"
     assert posts.sent[0][0] == "http://127.0.0.1:7/v1/chat/completions" and posts.sent[0][1]["model"] == "other-model"
 
 
