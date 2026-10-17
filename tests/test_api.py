@@ -187,7 +187,10 @@ def test_resume_resets_stage_to_queued(tmp_path, rules):
 
     with make_client(tmp_path, rules, analyze=blocked, workers=1) as c:
         body = c.get(f"/api/v1/jobs/{jid}", headers=KEY).json()
-        assert body == {"job_id": jid, "status": "processing", "stage": "queued"}
+        # the UI keys (video_url, elapsed_sec) are additive; the original three stay as they were
+        assert {k: body[k] for k in ("job_id", "status", "stage")} == {
+            "job_id": jid, "status": "processing", "stage": "queued"}
+        assert list(body) == ["job_id", "status", "stage", "video_url", "elapsed_sec"]
         gate.set()
         assert wait(c, jid)["status"] == "done"
 
