@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kuá — проверка кассовых видео</title>
+<style>
+:root{--bg:#f6f7f9;--fg:#1c2026;--muted:#5c6570;--card:#fff;--line:#d9dde3;--accent:#2457c5;--accent-fg:#fff;--ok:#1d7a3e;--warn:#b3261e;--warn-bg:#fdecea}
+@media (prefers-color-scheme:dark){:root{--bg:#14171b;--fg:#e6e9ee;--muted:#9aa4b0;--card:#1d2127;--line:#323944;--accent:#6b9bff;--accent-fg:#0d1117;--ok:#58c27d;--warn:#ff8a80;--warn-bg:#3a1f1d}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow-wrap:anywhere}
+main{max-width:960px;margin:0 auto;padding:16px}
+h1{font-size:1.5rem;margin:8px 0 16px}
+h2{font-size:1.1rem;margin:0 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+label{display:block;font-weight:600;margin:0 0 4px}
+input[type=password],input[type=file]{width:100%;max-width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+.field{margin-bottom:12px}
+button{font:inherit;cursor:pointer}
+#submit{background:var(--accent);color:var(--accent-fg);border:0;border-radius:6px;padding:10px 20px;font-weight:600}
+#submit:disabled{opacity:.5;cursor:not-allowed}
+button:focus-visible,input:focus-visible,video:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+#status{margin-top:12px;color:var(--muted)}
+#error{margin-top:12px;padding:10px 12px;border-radius:6px;background:var(--warn-bg);color:var(--warn);font-weight:600}
+[hidden]{display:none!important}
+video{display:block;width:100%;max-width:100%;max-height:70vh;object-fit:contain;background:#000;border-radius:6px}
+.verdict{font-size:1.25rem;font-weight:700}
+.verdict.ok{color:var(--ok)}.verdict.bad{color:var(--warn)}
+.viol{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}
+.viol:first-child{border-top:0;margin-top:0;padding-top:0}
+.vtype{font-weight:700}
+.tc{background:transparent;color:var(--accent);border:1px solid var(--accent);border-radius:6px;padding:2px 10px;margin:4px 0;font-variant-numeric:tabular-nums}
+.frames{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+figure{margin:0;max-width:100%}
+figure img{display:block;max-width:100%;height:auto;max-height:240px;border-radius:4px;cursor:pointer;border:1px solid var(--line)}
+figcaption{font-size:.85rem;color:var(--muted)}
+.rule{font-size:.95rem}
+blockquote{margin:4px 0;padding-left:12px;border-left:3px solid var(--line);color:var(--muted)}
+.hint{font-weight:600;border-left:4px solid var(--accent)}
+</style>
+</head>
+<body>
+<main>
+<h1>Kuá — проверка кассовых видео</h1>
+
+<p class="card hint" id="hint">Результат — подсказка для проверки человеком, а не окончательное заключение.</p>
+
+<form class="card" id="form">
+  <div class="field">
+    <label for="key">API-ключ</label>
+    <input id="key" type="password" autocomplete="off">
+  </div>
+  <div class="field">
+    <label for="file">Видео (.mov)</label>
+    <input id="file" type="file" accept=".mov,video/quicktime">
+  </div>
+  <button id="submit" type="submit">Проверить</button>
+  <div id="status" role="status" aria-live="polite" hidden></div>
+  <div id="error" role="alert" hidden></div>
+</form>
+
+<section class="card" id="player" hidden>
+  <video id="video" controls playsinline tabindex="-1"></video>
+</section>
+
+<section class="card" id="result" hidden>
+  <h2>Результат</h2>
+  <div id="verdict" class="verdict"></div>
+  <div id="violations"></div>
+</section>
+</main>
+<script>
+(function(){
+"use strict";
+var STAGES={queued:"В очереди",decoding:"Чтение видео",grounding:"Поиск событий",verifying:"Проверка фрагментов",writing:"Формирование результата"};
+var VERDICTS={no_violation:"Нарушение не обнаружено",violation:"Обнаружены признаки возможных нарушений"};
+var $=function(id){return document.getElementById(id)};
+var keyEl=$("key"),fileEl=$("file"),submit=$("submit"),statusEl=$("status"),errEl=$("error");
+var video=$("video"),playerEl=$("player"),resultEl=$("result"),verdictEl=$("verdict"),violEl=$("violations");
+var timer=null,tick=null,objectUrl=null,runId=0;
+
+try{var saved=localStorage.getItem("kua_api_key");if(saved)keyEl.value=saved}catch(e){}
+keyEl.addEventListener("input",function(){try{localStorage.setItem("kua_api_key",keyEl.value)}catch(e){}});
+
+function fmt(sec){
+  var s=Math.max(0,Number(sec)||0),m=Math.floor(s/60),r=s-m*60;
+  var t=r.toFixed(1);if(r<10)t="0"+t;
+  if(t==="60.0"){m+=1;t="00.0"}
+  return m+":"+t;
+}
+function showError(msg){errEl.textContent=msg;errEl.hidden=false}
+function stopTimers(){clearTimeout(timer);clearInterval(tick);timer=null;tick=null}
+function finish(){stopTimers();submit.disabled=false}
+function seek(t){
+  video.currentTime=Number(t)||0;
+  playerEl.scrollIntoView({block:"nearest",behavior:"smooth"});
+  try{video.focus({preventScroll:true})}catch(e){}
+  var p=video.play();if(p&&p.catch)p.catch(function(){});
+}
+function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+
+function render(job){
+  violEl.textContent="";
+  var v=job.verdict;
+  verdictEl.textContent=VERDICTS[v]||String(v);
+  verdictEl.className="verdict "+(v==="no_violation"?"ok":"bad");
+  (job.violations||[]).forEach(function(x){
+    var box=el("div","viol");
+    box.appendChild(el("div","vtype",x.type));
+    var b=el("button","tc",fmt(x.timecode_sec));b.type="button";
+    b.setAttribute("aria-label","Перейти к "+fmt(x.timecode_sec));
+    b.addEventListener("click",function(){seek(x.timecode_sec)});
+    box.appendChild(b);
+    box.appendChild(el("p",null,x.description));
+    var fr=el("div","frames");
+    (x.evidence_frames||[]).forEach(function(f){
+      var fg=el("figure");
+      var img=document.createElement("img");
+      img.src="data:image/jpeg;base64,"+f.image_base64;
+      img.alt="Кадр "+fmt(f.timestamp_sec);
+      img.addEventListener("click",function(){seek(f.timestamp_sec)});
+      fg.appendChild(img);fg.appendChild(el("figcaption",null,fmt(f.timestamp_sec)));
+      fr.appendChild(fg);
+    });
+    box.appendChild(fr);
+    var r=x.rule;
+    if(r){
+      var rb=el("div","rule");
+      rb.appendChild(el("strong",null,[r.document,r.clause].filter(Boolean).join(", ")));
+      if(r.quote)rb.appendChild(el("blockquote",null,r.quote));
+      if(r.url){
+        var a=el("a",null,r.url);a.href=r.url;a.target="_blank";a.rel="noopener";
+        var u=String(r.url);
+        if(!/^https?:\/\//i.test(u)&&u.charAt(0)!=="/"&&u.charAt(0)!=="#"){a.removeAttribute("href")}
+        rb.appendChild(a);
+      }
+      box.appendChild(rb);
+    }
+    violEl.appendChild(box);
+  });
+  resultEl.hidden=false;
+}
+
+function poll(id,key,my,t0){
+  fetch("/api/v1/jobs/"+encodeURIComponent(id),{headers:{"X-API-Key":key}}).then(function(r){
+    if(my!==runId)return;
+    if(r.status===401){showError("Неверный API-ключ");finish();return}
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    return r.json().then(function(j){
+      if(my!==runId)return;
+      if(j.status==="done"){statusEl.hidden=true;finish();render(j)}
+      else if(j.status==="failed"){statusEl.hidden=true;showError(j.error||"Ошибка обработки");finish()}
+      else{
+        statusEl.dataset.stage=STAGES[j.stage]||j.stage||"";
+        updateStatus(t0);
+        timer=setTimeout(function(){poll(id,key,my,t0)},2000);
+      }
+    });
+  }).catch(function(){
+    if(my!==runId)return;
+    showError("Ошибка сети. Проверьте соединение и повторите.");finish();
+  });
+}
+function updateStatus(t0){
+  var s=Math.floor((Date.now()-t0)/1000);
+  statusEl.textContent=(statusEl.dataset.stage||"В очереди")+" · "+s+" с";
+}
+
+$("form").addEventListener("submit",function(ev){
+  ev.preventDefault();
+  var f=fileEl.files[0],key=keyEl.value;
+  errEl.hidden=true;
+  if(!f){showError("Выберите видеофайл");return}
+  stopTimers();runId++;var my=runId;
+  submit.disabled=true;resultEl.hidden=true;
+  if(objectUrl)URL.revokeObjectURL(objectUrl);
+  objectUrl=URL.createObjectURL(f);video.src=objectUrl;playerEl.hidden=false;
+  var t0=Date.now();
+  statusEl.dataset.stage="Загрузка файла";statusEl.hidden=false;updateStatus(t0);
+  tick=setInterval(function(){updateStatus(t0)},1000);
+  var fd=new FormData();fd.append("file",f);
+  fetch("/api/v1/analyze",{method:"POST",headers:{"X-API-Key":key},body:fd}).then(function(r){
+    if(my!==runId)return;
+    if(r.status===401){showError("Неверный API-ключ");statusEl.hidden=true;finish();return}
+    if(r.status===413){showError("Файл слишком большой (максимум 200 МБ)");statusEl.hidden=true;finish();return}
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    return r.json().then(function(j){
+      if(my!==runId)return;
+      statusEl.dataset.stage="В очереди";
+      poll(j.job_id,key,my,t0);
+    });
+  }).catch(function(){
+    if(my!==runId)return;
+    statusEl.hidden=true;showError("Ошибка сети. Проверьте соединение и повторите.");finish();
+  });
+});
+})();
+</script>
+</body>
+</html>
