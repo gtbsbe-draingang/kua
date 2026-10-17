@@ -105,11 +105,13 @@ def summarize(per_clip: list[dict]) -> dict:
                 type_ok += r["pred"][pi].get("type_id") == tt
                 type_ok_nj += r["pred"][pi].get("type_id_no_judge") == tt
     lat = [r["latency_s"] for r in per_clip if r.get("latency_s") is not None]
+    flagged = [r for r in per_clip if r["status"] == "done" and r["verdict"] == "violation"]
     return {
         "n_clips": len(per_clip),
         "recall_clips": _share(found, len(viol)),
         "fp_clips": sum(1 for r in clean if r["status"] == "done" and r["verdict"] == "violation"),
         "verdict_acc": _share(ok, len(per_clip)),
+        "events_per_flagged_clip": _share(sum(len(r["pred"]) for r in flagged), len(flagged)),
         "tc_median": statistics.median(errors) if errors else None,
         "tc_max": max(errors) if errors else None,
         "tc_within_1s": _share(sum(e <= 1.0 for e in errors), n_truth),

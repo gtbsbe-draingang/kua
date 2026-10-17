@@ -100,7 +100,7 @@ def _dbg_event(t, ground, verify):
 def ref_keep(ground, verify, vlm_ok, th):
     if vlm_ok and verify is not None and verify >= th["verify"]:
         return True, "verified"
-    if ground >= th["strong"]:
+    if th["strong"] is not None and ground >= th["strong"]:
         return True, "strong_ground"
     if not vlm_ok and ground >= th["fallback"]:
         return True, "fallback_no_vlm"
@@ -123,6 +123,19 @@ def _done(*events):
     return {"status": "done", "verdict": "x", "violations": [], "debug": {"events": list(events)}}
 
 
+def _sweep(run, labels, out, keep=ref_keep):
+    return ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=keep)
+
+
+def _rows(text, k, v):
+    """The table rows (as tokens) for top_k k and verify v."""
+    return [ln.split() for ln in text.splitlines() if ln.split()[:2] == [str(k), f"{v:.2f}"]]
+
+
+# Legacy (segments) runs: no ranks and no generator in debug; cand masks events by ground_score, strong is
+# swept with "off", and the point is the one with the most found clips, then the fewest FP clips, then the
+# loosest verify, then the loosest cand, then strong off or the highest strong.
+
 def test_sweep_selection(tmp_path, capsys):
     run, labels = _write_run(tmp_path, {
         "X-1": _done(_dbg_event(10, 0.6, 0.7)),
@@ -130,46 +143,68 @@ def test_sweep_selection(tmp_path, capsys):
     })
     out = tmp_path / "t.json"
     out.write_text(json.dumps({"cand": 0.25, "verify": 0.5, "strong": 0.8, "fallback": 0.5, "top_k": 6}))
-    rc = ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=ref_keep)
-    assert rc == 0
+    assert _sweep(run, labels, out) == 0
     th = json.loads(out.read_text())
-    # fp 0 needs verify > 0.2 and strong > 0.3; ties: lowest cand 0.05, lowest verify 0.25,
-    # highest strong 0.95, lowest fallback 0.05. Loosening: cand stays at the 0.05 floor, verify 0.2.
-    assert (th["cand"], th["verify"], th["strong"], th["fallback"]) == (0.05, 0.2, 0.95, 0.05)
-    assert th["top_k"] == 6
+    # found 1 with fp 0 at the loosest verify (0.01) needs cand > 0.3 to drop the clean event: cand 0.35
+    assert (th["generator"], th["cand"], th["verify"], th["strong"], th["fallback"], th["top_k"]) == (
+        "segments", 0.35, 0.01, None, 0.5, 6)
     text = capsys.readouterr().out
-    assert "chosen: cand=0.05 verify=0.25 strong=0.95 fallback=0.05  recall=1.000 fp_clips=0" in text
-    assert "loosened: cand=0.05 verify=0.2  recall=1.000 fp_clips=1" in text
+    assert "chosen: verify=0.01 top_k=6 cand=0.35 strong=off  verdict_recall=1/1 found=1/1 fp_clips=0/1" in text
+    assert _rows(text, 6, 0.21) == [["6", "0.21", "0.05", "off", "1/1", "1/1", "0/1", "1.000", "1.00"]]
+    assert _rows(text, 6, 0.2) == [["6", "0.20", "0.05", "off", "1/1", "1/1", "1/1", "0.500", "1.00"]]
 
 
 def test_sweep_cand_excludes_clean_event(tmp_path):
-    # the clean event passes every verify setting, so only cand can exclude it (cand 0.35 > 0.3):
-    # chosen cand 0.35, verify 0.05 (lowest on ties); loosened cand 0.3, verify stays at the 0.05 floor
+    # the clean event passes every verify setting below 0.95, so only cand can exclude it (cand 0.35 > 0.3)
     run, labels = _write_run(tmp_path, {
         "X-1": _done(_dbg_event(10, 0.6, 0.9)),
         "X-2": _done(_dbg_event(5, 0.3, 0.95)),
     })
     out = tmp_path / "t.json"
-    assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=ref_keep) == 0
+    assert _sweep(run, labels, out) == 0
     th = json.loads(out.read_text())
-    assert (th["cand"], th["verify"]) == (0.3, 0.05)
+    assert (th["cand"], th["verify"], th["strong"]) == (0.35, 0.01, None)
 
 
-def test_sweep_failed_violation_clip_blocks(tmp_path, capsys):
+def test_sweep_strong_is_chosen_only_when_it_finds_more(tmp_path, capsys):
+    # InternVideo3 says no everywhere: only strong >= 0.55 (above the clean event) and <= 0.9 finds X-1
+    run, labels = _write_run(tmp_path, {
+        "X-1": _done(_dbg_event(10, 0.9, 0.0)),
+        "X-2": _done(_dbg_event(5, 0.5, 0.0)),
+    })
+    out = tmp_path / "t.json"
+    assert _sweep(run, labels, out) == 0
+    th = json.loads(out.read_text())
+    assert (th["cand"], th["verify"], th["strong"]) == (0.05, 0.01, 0.9)
+    text = capsys.readouterr().out
+    off = [ln.split() for ln in text.splitlines() if ln.split()[:1] == ["off"]]
+    assert off and off[0][5] == "0/1"  # strong off finds nothing
+    assert any(ln.split()[:2] == ["0.90", "0.05"] for ln in text.splitlines())
+
+
+def test_sweep_failed_violation_clip_counts_as_missed(tmp_path, capsys):
     run, labels = _write_run(tmp_path, {
         "X-1": {"status": "failed", "error": "x"},
         "X-2": _done(_dbg_event(5, 0.3, 0.2)),
     })
     out = tmp_path / "t.json"
-    assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=ref_keep) == 1
-    assert not out.exists()
-    assert "X-1" in capsys.readouterr().out
+    assert _sweep(run, labels, out) == 0
+    text = capsys.readouterr().out
+    assert "recall 1.0 is not reachable" in text and "X-1" in text
+    assert json.loads(out.read_text())["verify"] == 0.01  # fp 0 through cand 0.35
 
 
-def test_sweep_absent_violation_clip_blocks(tmp_path):
+def test_sweep_absent_violation_clip_counts_as_missed(tmp_path, capsys):
     run, labels = _write_run(tmp_path, {"X-2": _done(_dbg_event(5, 0.3, 0.2))})
     out = tmp_path / "t.json"
-    assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)], keep=ref_keep) == 1
+    assert _sweep(run, labels, out) == 0
+    assert out.exists() and "recall 1.0 is not reachable" in capsys.readouterr().out
+
+
+def test_sweep_without_usable_clips_writes_nothing(tmp_path):
+    run, labels = _write_run(tmp_path, {"X-1": {"status": "failed", "error": "x"}})
+    out = tmp_path / "t.json"
+    assert _sweep(run, labels, out) == 1
     assert not out.exists()
 
 
@@ -179,6 +214,75 @@ def test_sweep_with_real_logic(tmp_path):
         "X-1": _done(_dbg_event(10, 0.6, 0.7)), "X-2": _done(_dbg_event(5, 0.3, 0.2))})
     out = tmp_path / "t.json"
     assert ev.main(["sweep", "--run", str(run), "--labels", str(labels), "--out", str(out)]) == 0
+
+
+# Cells runs: every event counts (no cand mask), strong stays off, top_k is simulated from each event's rank.
+
+CELLS_TH = {"generator": "cells", "cell_sec": 4.0, "rank": "logit", "cand": 0.25, "verify": 0.05, "strong": None,
+            "fallback": 0.5, "top_k": 2, "merge_sec": 3, "anchor": "center", "anchor_offset_sec": 0}
+
+
+def _cells_event(t, verify, rank, ground=0.0):
+    return {**_dbg_event(t, ground, verify), "t_start": t - 2, "t_end": t + 2, "rank": rank}
+
+
+def _cells_done(*events):
+    return {"status": "done", "verdict": "x", "violations": [],
+            "debug": {"events": list(events), "generator": "cells", "cell_sec": 4.0, "generator_fallback": False,
+                      "versions": {"thresholds": json.dumps(CELLS_TH, sort_keys=True)}}}
+
+
+def _cells_run(tmp_path):
+    # X-3's label at 30 s has no event within 2 s, so recall 1.0 cannot be reached. X-1's label is only in its
+    # rank-1 cell (a run's ground_score plays no part: 0.0 everywhere). Clean X-2 is flagged at verify <= 0.30,
+    # clean X-4 at verify <= 0.33.
+    return _write_run(tmp_path, {
+        "X-1": _cells_done(_cells_event(2, 0.60, 0), _cells_event(10, 0.40, 1)),
+        "X-2": _cells_done(_cells_event(5, 0.30, 0), _cells_event(9, 0.03, 1)),
+        "X-3": _cells_done(_cells_event(40, 0.70, 0), _cells_event(44, 0.20, 1)),
+        "X-4": _cells_done(_cells_event(3, 0.33, 0)),
+    }, extra_rows="X-3,1,30,,,,main,given,\nX-4,0,,,,,main,given,\n")
+
+
+def test_sweep_cells_prints_the_curve_and_picks_most_found_then_fewest_fp(tmp_path, capsys):
+    run, labels = _cells_run(tmp_path)
+    out = tmp_path / "t.json"
+    out.write_text(json.dumps({**CELLS_TH, "top_k": 6, "verify": 0.5}))
+    assert _sweep(run, labels, out) == 0
+    text = capsys.readouterr().out
+    # top_k verify verdict_recall found fp_clips verdict_acc events/flagged
+    assert _rows(text, 2, 0.35) == [["2", "0.35", "2/2", "1/2", "0/2", "1.000", "1.50", "<-", "chosen"]]
+    assert _rows(text, 2, 0.4) == [["2", "0.40", "2/2", "1/2", "0/2", "1.000", "1.50"]]
+    assert _rows(text, 2, 0.3) == [["2", "0.30", "2/2", "1/2", "2/2", "0.500", "1.25"]]
+    assert _rows(text, 2, 0.01) == [["2", "0.01", "2/2", "1/2", "2/2", "0.500", "1.75"]]
+    assert _rows(text, 1, 0.35) == [["1", "0.35", "2/2", "0/2", "0/2", "1.000", "1.00"]]  # X-1's label is rank 1
+    assert _rows(text, 2, 0.95) == [["2", "0.95", "0/2", "0/2", "0/2", "0.500", "-"]]
+    assert not _rows(text, 3, 0.35)  # no top_k above the run's own
+    assert len([ln for ln in text.splitlines() if ln.split()[:1] in (["1"], ["2"])]) == 2 * 43
+    assert "recall 1.0 is not reachable" in text and "X-3" in text
+    th = json.loads(out.read_text())
+    assert th == {**CELLS_TH, "verify": 0.35, "top_k": 2, "strong": None}
+
+
+def test_sweep_cells_events_without_rank_count_at_every_top_k(tmp_path, capsys):
+    # the fallback grid has no ranks: its events are kept at every simulated top_k
+    run, labels = _write_run(tmp_path, {
+        "X-1": _cells_done(_cells_event(2, 0.6, None), _cells_event(10, 0.4, None)),
+        "X-2": _cells_done(_cells_event(5, 0.1, 0)),
+    })
+    out = tmp_path / "t.json"
+    assert _sweep(run, labels, out) == 0
+    assert _rows(capsys.readouterr().out, 1, 0.4)[0][:5] == ["1", "0.40", "1/1", "1/1", "0/1"]
+    th = json.loads(out.read_text())
+    assert (th["verify"], th["top_k"]) == (0.11, 2)  # the loosest verify with fp 0; the run's top_k on a tie
+
+
+def test_sweep_refuses_a_run_with_two_generators(tmp_path):
+    run, labels = _write_run(tmp_path, {
+        "X-1": _cells_done(_cells_event(10, 0.6, 0)), "X-2": _done(_dbg_event(5, 0.3, 0.2))})
+    out = tmp_path / "t.json"
+    assert _sweep(run, labels, out) == 2
+    assert not out.exists()
 
 
 def test_summary_counts_failed_and_missing():
@@ -202,3 +306,15 @@ def test_malformed_timecode_does_not_crash():
     pred = ev._pred_from_body(body)
     assert [p["timecode_sec"] for p in pred] == [3.0]
     assert match_events([{"timecode_sec": None}, {"timecode_sec": "x"}], [{"t_label": 3}]) == []
+
+
+def test_summary_events_per_flagged_clip():
+    recs = [
+        _rec("X-1", 1, [{"t_label": 22, "type_id": ""}], [{"timecode_sec": 22}, {"timecode_sec": 40}], "violation"),
+        _rec("X-3", 0, [], [{"timecode_sec": 5}], "violation"),
+        _rec("X-5", 0, [], [], "no_violation"),
+        make_record("X-2", 1, [{"t_label": 10, "type_id": ""}], [], None, "timeout", 330.0, []),
+    ]
+    s = summarize(recs)
+    assert s["events_per_flagged_clip"] == 1.5 and s["verdict_acc"] == 0.5
+    assert summarize(recs[2:])["events_per_flagged_clip"] is None
