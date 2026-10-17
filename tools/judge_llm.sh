@@ -6,10 +6,15 @@
 #   bash judge_llm.sh start    refuse when under 35 GiB of GPU memory is free; else start the server in
 #                              the background and return once its process is up. Loading the weights and
 #                              capturing CUDA graphs takes minutes: poll `status`.
+#                              --mem-fraction-static is a fraction of the GPU memory that is FREE at start
+#                              (SGLang: slack = free * (1 - fraction), taken from what is left after the
+#                              weights), not of the card. The GPU is shared and the free amount varies, so
+#                              the fraction is computed to give a fixed pool of 28 GiB: the weights (17.6 GiB)
+#                              plus about 10 GiB for the KV cache and the recurrent-state slots.
 #   bash judge_llm.sh status   pid and GET /health. Exit 0 healthy, 3 running but not ready, 1 not running.
 #   bash judge_llm.sh stop     TERM the server named in logs/judge_llm.pid (after checking that the process
-#                              is sglang on port 30005), KILL after 60 s; then any process left in its
-#                              session is killed too.
+#                              is sglang on port 30005), KILL after 60 s; then any live process left in
+#                              its session (a scheduler orphaned by a crash) is killed too.
 #
 # Log: logs/judge_llm.log (appended). Pid: logs/judge_llm.pid.
 set -euo pipefail
@@ -24,6 +29,7 @@ PORT=30005
 MODEL_PATH=Qwen/Qwen3.5-9B
 SERVED_NAME=qwen3.5-9b
 MIN_FREE_MIB=$((35 * 1024))
+STATIC_MIB=$((28 * 1024))   # weights + KV cache + recurrent-state pool; see the header
 
 PY=$MTA_ROOT/env/vlm/bin/python
 LOG=$MTA_ROOT/logs/judge_llm.log
@@ -65,7 +71,7 @@ ctl_lock() {
 }
 
 start() {
-  local pid free
+  local pid free fraction
   ctl_lock
   if pid=$(server_pid); then
     echo "already running (pid $pid)"
@@ -74,13 +80,14 @@ start() {
   [ -x "$PY" ] || die "no env/vlm: $PY"
   free=$(gpu_free_mib) || die "cannot read the free GPU memory from nvidia-smi"
   [ "$free" -ge "$MIN_FREE_MIB" ] || die "only $free MiB of GPU memory is free, need $MIN_FREE_MIB"
+  fraction=$(awk -v pool="$STATIC_MIB" -v free="$free" 'BEGIN { printf "%.3f", pool / free }')
   mkdir -p "$(dirname "$LOG")"
-  echo "[$(date -u '+%F %T')] start judge llm ($free MiB of GPU memory free)" >>"$LOG"
+  echo "[$(date -u '+%F %T')] start judge llm ($free MiB of GPU memory free, --mem-fraction-static $fraction)" >>"$LOG"
   # setsid: its own session, so stop can find every process it spawned. 8>&-: the server must not keep the lock.
   OMP_NUM_THREADS=4 setsid nohup "$PY" -m sglang.launch_server \
     --model-path "$MODEL_PATH" --served-model-name "$SERVED_NAME" \
     --host 127.0.0.1 --port "$PORT" \
-    --mem-fraction-static 0.2 --context-length 32768 \
+    --mem-fraction-static "$fraction" --context-length 32768 \
     >>"$LOG" 2>&1 </dev/null 8>&- &
   pid=$!
   echo "$pid" >"$PIDFILE"
@@ -89,11 +96,11 @@ start() {
   echo "started (pid $pid); log $LOG; poll: bash $SELF status"
 }
 
-# Processes still in the session of the server we started (its scheduler and helper processes), as long as
-# they run a binary from inside the root.
+# Live processes in the session we started (its scheduler and helper processes) that run a binary from inside
+# the root. Zombies have no binary and are skipped.
 session_leftovers() {
-  local pid=$1 p
-  for p in $(pgrep -g "$pid" || true); do
+  local sid=$1 p
+  for p in $(pgrep -s "$sid" || true); do
     case "$(readlink "/proc/$p/exe" 2>/dev/null || true)" in
       "$MTA_ROOT"/*) echo "$p" ;;
     esac
@@ -101,29 +108,33 @@ session_leftovers() {
 }
 
 stop() {
-  local pid p
+  local pid='' p note=''
   ctl_lock
-  if ! pid=$(server_pid); then
-    rm -f "$PIDFILE"
-    echo "not running"
-    return
-  fi
-  kill -TERM "$pid" 2>/dev/null || true
-  for _ in $(seq 60); do
-    alive "$pid" || break
+  if [ -s "$PIDFILE" ]; then pid=$(<"$PIDFILE"); fi
+  [[ $pid =~ ^[0-9]+$ ]] || pid=''
+  if [ -n "$pid" ] && server_pid >/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 60); do
+      alive "$pid" || break
+      sleep 1
+    done
+    if alive "$pid"; then
+      echo "pid $pid ignored TERM for 60 s: KILL"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
     sleep 1
-  done
-  if alive "$pid"; then
-    echo "pid $pid ignored TERM for 60 s: KILL"
-    kill -KILL "$pid" 2>/dev/null || true
+  else
+    note=" (no server process was running)"
   fi
-  sleep 1
-  for p in $(session_leftovers "$pid"); do
-    echo "killing leftover pid $p of the server's session"
-    kill -KILL "$p" 2>/dev/null || true
-  done
+  # a crashed or killed server can leave its scheduler behind, holding GPU memory
+  if [ -n "$pid" ]; then
+    for p in $(session_leftovers "$pid"); do
+      echo "killing leftover pid $p of the server's session"
+      kill -KILL "$p" 2>/dev/null || true
+    done
+  fi
   rm -f "$PIDFILE"
-  echo "stopped"
+  echo "stopped$note"
 }
 
 status() {
