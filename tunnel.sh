@@ -15,8 +15,10 @@
 #
 # The agent runs with HOME=env/tunnel, so nothing is written outside the root.
 # Logs go to logs/tunnel.log. A loop restarts the agent when it exits, backing off
-# from 5 s to 60 s. run.sh calls `start` once the API is up; a tunnel that cannot
-# connect never keeps the API from starting.
+# from 5 s to 60 s. After a hard kill, ngrok keeps the old session for a while and
+# refuses the new agent until it expires; the loop's backoff rides that out, so
+# `wait` can exit 3 for a minute or so. run.sh calls `start` once the API is up and
+# treats a failed `wait` as a warning: the tunnel never keeps the API from starting.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -36,7 +38,8 @@ HOME_DIR=$MTA_ROOT/env/tunnel
 BIN=$HOME_DIR/bin/ngrok
 CONF=$MTA_ROOT/secrets/ngrok.yml
 PIDFILE=$HOME_DIR/ngrok.pid
-LOCK=$HOME_DIR/ngrok.lock
+LOCK=$HOME_DIR/ngrok.lock   # held by the running loop on fd 9: the real liveness test
+CTL=$HOME_DIR/ngrok.ctl     # serialises start and stop (fd 8)
 LOG=$MTA_ROOT/logs/tunnel.log
 
 usage() { sed -n '2,/^set -euo pipefail/{/^#/s/^# \{0,1\}//p;}' "$SELF"; }
@@ -52,7 +55,8 @@ install() {
   curl -fsSL --retry 3 -o "$deb" "$DEB" || { rm -f "$deb"; die "download failed: $DEB"; }
   echo "$SHA256  $deb" | sha256sum -c --quiet - >/dev/null 2>&1 \
     || { rm -f "$deb"; die "checksum mismatch for $DEB"; }
-  dpkg-deb --fsys-tarfile "$deb" | tar -xO ./usr/local/bin/ngrok >"$BIN.part"
+  dpkg-deb --fsys-tarfile "$deb" | tar -xO ./usr/local/bin/ngrok >"$BIN.part" \
+    || { rm -f "$deb" "$BIN.part"; die "could not extract ngrok from $deb"; }
   rm -f "$deb"
   chmod 755 "$BIN.part"
   mv -f "$BIN.part" "$BIN"
@@ -60,6 +64,7 @@ install() {
 }
 
 # The loop's pid, if that process is alive and really is our loop (pids get reused).
+# A loop that is shutting down has emptied the file, so it no longer counts.
 loop_pid() {
   local pid
   [ -s "$PIDFILE" ] || return 1
@@ -68,13 +73,27 @@ loop_pid() {
   echo "$pid"
 }
 
+# The pid of whichever loop holds the lock, draining or not.
+lock_holder() {
+  local fd pid
+  for fd in /proc/[0-9]*/fd/9; do
+    [ "$(readlink "$fd" 2>/dev/null)" = "$LOCK" ] || continue
+    pid=${fd#/proc/}
+    pid=${pid%%/*}
+    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF "$SELF _loop" || continue
+    echo "$pid"
+    return 0
+  done
+  return 1
+}
+
 # Agents of our own binary, supervised or not.
 agent_pids() { pgrep -d ' ' -f "^$BIN " || true; }
 
 # The public URL the running agent serves, from its local API.
 endpoint() {
   curl -fsS --noproxy '*' -m 3 "http://$AGENT_API/api/tunnels" 2>/dev/null \
-    | grep -o '"public_url":"[^"]*"' | head -n 1 | cut -d'"' -f4
+    | grep -o '"public_url" *: *"[^"]*"' | sed -n 1p | cut -d'"' -f4
 }
 
 # TERM every agent of our binary, wait up to 45 s, then KILL what is left.
@@ -89,26 +108,42 @@ reap_agents() {
   sleep 1
 }
 
+ctl_lock() {
+  exec 8>"$CTL"
+  flock -w 120 8 || die "another start or stop has been running for 2 minutes"
+}
+
 start() {
   local pid
   [ -x "$BIN" ] || die "ngrok missing: run 'bash tunnel.sh install' first"
   [ -s "$CONF" ] || die "no agent config with the authtoken in $CONF"
   [ "$(stat -c %a "$CONF")" = 600 ] || die "$CONF must be mode 600"
+  ctl_lock
   if pid=$(loop_pid); then
     echo "already running (loop pid $pid)"
     return
   fi
-  # No loop, so any agent left is an orphan (its loop was killed) or still
+  # No live loop, so any agent left is an orphan (its loop was killed) or still
   # draining after a stop. It holds the endpoint, so a new agent would be refused.
   reap_agents
   [ -z "$(agent_pids)" ] || die "an old agent survived KILL: $(agent_pids)"
   mkdir -p "$(dirname "$LOG")"
-  setsid nohup bash "$SELF" _loop >>"$LOG" 2>&1 </dev/null &
-  echo "started (loop pid $!)"
+  setsid nohup bash "$SELF" _loop 8>&- >>"$LOG" 2>&1 </dev/null &
+  # Hold the control lock until the loop has its lock and pid file, so a second
+  # start or a stop right behind this one sees it.
+  for _ in $(seq 75); do
+    if pid=$(loop_pid); then
+      echo "started (loop pid $pid)"
+      return
+    fi
+    sleep 0.2
+  done
+  die "the loop did not come up within 15 s (see $LOG)"
 }
 
 # Runs detached (from start). On TERM it empties the pid file at once, so a loop
-# that is shutting down never counts as running, then lets the agent drain.
+# that is shutting down never counts as running, then lets the agent drain. It
+# keeps the lock until the agent is gone.
 _loop() {
   local child='' stopping=0 delay=5 started rc
   exec 9>"$LOCK"
@@ -124,13 +159,20 @@ _loop() {
     [ "$stopping" = 0 ] || kill -TERM "$child" 2>/dev/null || true
     rc=0
     wait "$child" || rc=$?
-    # The trap interrupts wait; wait again for the agent to finish draining.
-    [ "$stopping" = 0 ] || { wait "$child" 2>/dev/null || true; break; }
+    if [ "$stopping" = 1 ]; then
+      # The trap interrupts wait (a second TERM interrupts it again): keep
+      # waiting until the agent has finished draining.
+      while kill -0 "$child" 2>/dev/null; do wait "$child" 2>/dev/null || true; done
+      break
+    fi
     child=''
     [ $(( $(date +%s) - started )) -lt 60 ] || delay=5
     echo "$(date -Is) ngrok exited (rc $rc), restarting in $delay s"
+    # A TERM that arrived while no child was set has already ended the loop.
+    [ "$stopping" = 0 ] || break
     sleep "$delay" 9>&- &
     child=$!
+    [ "$stopping" = 0 ] || kill -TERM "$child" 2>/dev/null || true
     wait "$child" || true
     child=''
     delay=$(( delay * 2 > 60 ? 60 : delay * 2 ))
@@ -139,13 +181,14 @@ _loop() {
 }
 
 wait_online() {
-  local secs=${1:-30}
-  for _ in $(seq "$secs"); do
+  local secs=$1 i
+  [[ $secs =~ ^[0-9]+$ ]] || die "wait: seconds must be a whole number, got '$secs'"
+  for (( i = 0; i <= secs; i++ )); do
     if [ "$(endpoint || true)" = "$PUBLIC_URL" ]; then
       echo "online: $PUBLIC_URL"
       return
     fi
-    sleep 1
+    if [ "$i" -lt "$secs" ]; then sleep 1; fi
   done
   echo "tunnel.sh: not online after $secs s (see $LOG)" >&2
   return 3
@@ -153,28 +196,28 @@ wait_online() {
 
 stop() {
   local pid
+  ctl_lock
   if pid=$(loop_pid); then
     kill -TERM "$pid" 2>/dev/null || true
   fi
   reap_agents
-  # The loop exits as soon as its agent is gone.
-  for _ in $(seq 5); do
-    loop_pid >/dev/null || break
-    sleep 1
-  done
-  if pid=$(loop_pid); then
-    kill -KILL "$pid" 2>/dev/null || true
+  # The loop exits as soon as its agent is gone and releases the lock.
+  if ! flock -w 10 "$LOCK" true; then
+    if pid=$(lock_holder); then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    reap_agents
+    flock -w 5 "$LOCK" true || die "a loop still holds $LOCK"
   fi
-  if loop_pid >/dev/null || [ -n "$(agent_pids)" ]; then
-    die "still running after KILL"
-  fi
+  [ -z "$(agent_pids)" ] || die "an agent survived KILL: $(agent_pids)"
   echo "stopped"
 }
 
 status() {
-  local pid url
+  local pid url agents
   if pid=$(loop_pid); then echo "loop pid $pid"; else echo "loop: not running"; fi
-  echo "agent pid(s): $(agent_pids)"
+  agents=$(agent_pids)
+  echo "agent pid(s): ${agents:-none}"
   if url=$(endpoint) && [ -n "$url" ]; then echo "endpoint: $url"; else echo "endpoint: offline"; fi
   if [ -f "$LOG" ]; then tail -n 5 "$LOG"; fi
   return 0
