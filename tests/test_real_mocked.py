@@ -216,7 +216,8 @@ def test_real_mocked_end_to_end(rig, clip, rules):
 
     assert {"decoding", "grounding", "choosing", "verifying", "writing", "total"} <= set(res.timings)
     assert res.versions["pipeline"] == "real" and res.versions["rules"].startswith("v1 ")
-    assert json.loads(res.versions["thresholds"]) == {**TH, "zoom": False, "verify_mode": "single"}  # the defaults
+    assert json.loads(res.versions["thresholds"]) == {**TH, "zoom": False, "verify_mode": "single",
+                                                      "judge_weak": 0.5}  # the defaults
     assert sorted(os.listdir(Path(clip).parent)) == ["input.mov"]  # nothing written next to the input
     assert os.listdir(rig.scratch) == []  # the work folder is removed
 
@@ -580,7 +581,8 @@ def test_cells_end_to_end(cells_rig, clip):
     dbg = json.loads(json.dumps(to_debug(res)))
     assert (dbg["generator"], dbg["cell_sec"], dbg["generator_fallback"]) == ("cells", 4.0, False)
     assert [e["rank"] for e in dbg["events"]] == [0, 1]
-    assert json.loads(res.versions["thresholds"]) == {**TH_CELLS, "zoom": False, "verify_mode": "single"}
+    assert json.loads(res.versions["thresholds"]) == {**TH_CELLS, "zoom": False, "verify_mode": "single",
+                                                      "judge_weak": 0.5}
 
 
 def test_cells_rule_is_the_rank_argmax_query_and_ground_is_the_cell_raw_max(monkeypatch, tmp_path, rules, clip):
@@ -662,7 +664,10 @@ def test_thresholds_strong_null_cells_keys_and_rejections(tmp_path):
            ({"generator": "peaks"}, "generator"), ({"rank": "z"}, "rank"), ({"cell_sec": 0}, "cell_sec"),
            ({"cell_sec": None}, "cell_sec"), ({"anchor": "middle"}, "anchor"), ({"zoom": "yes"}, "zoom"),
            ({"zoom": 1}, "zoom"), ({"zoom": None}, "zoom"), ({"verify_mode": "both"}, "verify_mode"),
-           ({"verify_mode": None}, "verify_mode"), ({"verify_mode": ["multi"]}, "verify_mode")]
+           ({"verify_mode": None}, "verify_mode"), ({"verify_mode": ["multi"]}, "verify_mode"),
+           ({"judge_weak": "low"}, "judge_weak"), ({"judge_weak": True}, "judge_weak"),
+           ({"judge_weak": None}, "judge_weak"), ({"judge_weak": float("nan")}, "judge_weak"),
+           ({"judge_weak": -0.1}, "judge_weak"), ({"judge_weak": 1.5}, "judge_weak")]
     for change, match in bad:
         p.write_text(json.dumps({**TH_CELLS, **change}))
         with pytest.raises(ValueError, match=match):
@@ -681,7 +686,7 @@ def test_committed_thresholds_use_grid_without_strong():
     assert real._load_thresholds(ROOT / "thresholds.json") == {
         "generator": "grid", "cell_sec": 4.0, "rank": "logit", "cand": 0.25, "verify": 0.05, "strong": None,
         "fallback": 0.5, "top_k": 16, "merge_sec": 3, "anchor": "center", "anchor_offset_sec": 0,
-        "zoom": False, "verify_mode": "single"}
+        "zoom": False, "verify_mode": "single", "judge_weak": 0.5}
 
 
 # ---- the switches: zoom and the per-rule check -----------------------------------------------------------
@@ -846,8 +851,8 @@ def test_thresholds_without_new_keys_load_with_defaults(rig, clip, tmp_path):
     p = tmp_path / "old.json"
     p.write_text(json.dumps(TH_CELLS))  # written before the switches existed
     th = real._load_thresholds(p)
-    assert (th["zoom"], th["verify_mode"]) == (False, "single")
-    assert {k: v for k, v in th.items() if k not in ("zoom", "verify_mode")} == TH_CELLS
+    assert (th["zoom"], th["verify_mode"], th["judge_weak"]) == (False, "single", 0.5)
+    assert {k: v for k, v in th.items() if k not in ("zoom", "verify_mode", "judge_weak")} == TH_CELLS
     p.write_text(json.dumps({**TH_CELLS, "zoom": True, "verify_mode": "multi"}))
     th = real._load_thresholds(p)
     assert (th["zoom"], th["verify_mode"]) == (True, "multi")
@@ -884,6 +889,89 @@ def test_judge_citation_reaches_api(rig, clip, rules):
         v, = api.to_api("abc123def456", res, rules)["violations"]
         c = rules[v["type_id"]]["citations"][0]
         assert v["rule"] == {k: c.get(k, "") for k in CITATION}
+
+
+# ---- a weak judge signal: the catalogue's hedged text, tagged ---------------------------------------------
+
+JUDGE_TEXT = "Нарушений на записи нет, кассир работает штатно."
+
+
+def judged_event(rig, clip, violation, rid="cash_unattended", text=JUDGE_TEXT, answer=None):
+    two_candidates(rig)
+    rig.judge_answer = answer or {"rule_id": rid, "justification": text, "confidence": 0.7, "clause_id": None,
+                                  "violation": violation, "citation": CITATION}
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    ev, = kept(res)
+    return res, ev
+
+
+def test_weak_judge_signal_shows_the_catalogue_text(rig, clip, rules):
+    res, ev = judged_event(rig, clip, 0.0)
+    assert ev.weak is True and ev.judge_violation == 0.0
+    assert ev.justification == rules["cash_unattended"]["why"]
+    assert ev.judge_text == JUDGE_TEXT  # kept for debugging
+    # the judge's type, source and citation stay; detection and verdict are untouched
+    assert (ev.type_source, ev.judge_rule_id, ev.rule_id, ev.citation) == ("judge", "cash_unattended",
+                                                                        "cash_unattended", CITATION)
+    assert res.verdict == "violation" and ev.kept and ev.reason == "verified"
+
+
+def test_weak_signal_uses_the_why_of_the_accepted_rule_not_of_the_detected_one(rig, clip, rules):
+    _, ev = judged_event(rig, clip, 0.0, rid="other")
+    assert ev.rule_id == "cash_unattended" and ev.judge_rule_id == "other"
+    assert ev.weak and ev.justification == rules["other"]["why"]
+
+
+@pytest.mark.parametrize("violation", [0.5, 0.51, 0.9, 1.0])
+def test_judge_violation_at_or_above_the_threshold_keeps_the_judge_text(rig, clip, violation):
+    _, ev = judged_event(rig, clip, violation)
+    assert ev.weak is False and ev.judge_violation == violation
+    assert ev.justification == JUDGE_TEXT and ev.judge_text == JUDGE_TEXT
+
+
+def test_just_below_the_threshold_is_weak(rig, clip, rules):
+    _, ev = judged_event(rig, clip, 0.49)
+    assert ev.weak is True and ev.justification == rules["cash_unattended"]["why"]
+
+
+def test_judge_without_a_violation_probability_keeps_the_judge_text(rig, clip):
+    _, ev = judged_event(rig, clip, None)
+    assert ev.weak is False and ev.judge_violation is None
+    assert ev.justification == JUDGE_TEXT and ev.judge_text == JUDGE_TEXT
+
+
+@pytest.mark.parametrize("judge_weak, violation, weak", [(0.8, 0.7, True), (0.8, 0.8, False), (0.0, 0.0, False),
+                                                          (1.0, 0.99, True), (1.0, 1.0, False)])
+def test_weak_threshold_comes_from_thresholds_json(monkeypatch, tmp_path, rules, clip, judge_weak, violation, weak):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH, "judge_weak": judge_weak})
+    _, ev = judged_event(rig, clip, violation)
+    assert ev.weak is weak
+    assert ev.justification == (rules["cash_unattended"]["why"] if weak else JUDGE_TEXT)
+
+
+def test_fallback_is_never_weak(rig, clip, rules, monkeypatch):
+    # an answer that is not a candidate is not accepted, even with a zero probability
+    _, ev = judged_event(rig, clip, 0.0, rid="x")
+    assert (ev.type_source, ev.weak, ev.judge_violation, ev.judge_text) == ("fallback", False, None, "")
+    assert ev.justification == rules[ev.rule_id]["why"]
+    # nor is an accepted answer without a justification
+    _, ev = judged_event(rig, clip, 0.0, text="")
+    assert (ev.type_source, ev.weak, ev.judge_violation, ev.judge_text) == ("fallback", False, None, "")
+    # no judge at all
+    monkeypatch.setattr(real, "judge_answer", REAL_JUDGE_ANSWER)
+    monkeypatch.setenv("JUDGE_URL", "")
+    _, ev = judged_event(rig, clip, 0.0)
+    assert (ev.type_source, ev.weak, ev.judge_violation, ev.judge_text) == ("fallback", False, None, "")
+
+
+def test_weak_signal_reaches_the_api_with_the_hedged_description(rig, clip, rules):
+    import api
+    res, _ = judged_event(rig, clip, 0.0)
+    v, = api.to_api("abc123def456", res, rules)["violations"]
+    assert v["weak_signal"] is True and v["type_source"] == "judge" and v["type_id"] == "cash_unattended"
+    assert v["justification"] == rules["cash_unattended"]["why"]
+    assert rules["cash_unattended"]["why"] in v["description"] and JUDGE_TEXT not in v["description"]
+    assert v["rule"] == CITATION  # the judge's citation stays
 
 
 # ---- the grid generator: evenly spaced cells, no VideoJev ------------------------------------------------

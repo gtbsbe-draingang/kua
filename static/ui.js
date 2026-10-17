@@ -659,6 +659,7 @@
         timecode: isFinite(tc) ? Math.max(0, tc) : 0,
         start: hasWindow ? Math.max(0, ts) : null,
         end: hasWindow ? te : null,
+        weak: v.weak_signal === true, // results stored before the field existed are not weak
         frames: (Array.isArray(v.evidence_frames) ? v.evidence_frames : []).filter(function (f) {
           return f && typeof f.image_base64 === "string" && f.image_base64;
         })
@@ -675,9 +676,12 @@
     verdictEl.className = "verdict" + (v === "violation" ? " is-violation" : v === "no_violation" ? " is-clean" : "");
     verdictTitle.textContent = VERDICTS[v] || "Результат не распознан. Обратитесь к администратору сервиса.";
     var n = events.length;
+    var nWeak = events.filter(function (e) { return e.weak; }).length;
     verdictMeta.textContent = v === "no_violation" && !n
       ? "Эпизодов для проверки нет"
-      : n + " " + plural(n, "эпизод", "эпизода", "эпизодов") + " для проверки";
+      : nWeak
+        ? n + " " + plural(n, "эпизод", "эпизода", "эпизодов") + ", из них " + nWeak + " — слабый сигнал"
+        : n + " " + plural(n, "эпизод", "эпизода", "эпизодов") + " для проверки";
 
     workspace.classList.toggle("no-events", !n);
     if (n) events.forEach(function (e, i) { eventsEl.appendChild(renderCard(e, i)); });
@@ -732,7 +736,14 @@
     tc.setAttribute("aria-label", "Перейти к " + fmtTime(e.timecode) + " на видео");
     tc.addEventListener("click", function () { jumpTo(e.timecode, i, "card"); });
     head.appendChild(tc);
-    if (v.type_source === "judge") {
+    if (e.weak) {
+      // the model that picked the type rated a violation unlikely, so the card carries the catalogue's hedged
+      // text, not the model's wording: this tag stands in for «оценка модели»
+      card.classList.add("is-weak");
+      var tw = el("span", "tag outline", "слабый сигнал");
+      tw.title = "Языковая модель сама сочла нарушение маловероятным, поэтому показан осторожный текст из каталога правил";
+      head.appendChild(tw);
+    } else if (v.type_source === "judge") {
       var tj = el("span", "tag outline", "оценка модели");
       tj.title = "Тип и обоснование сформулировала языковая модель по найденным нормам";
       head.appendChild(tj);
@@ -958,14 +969,15 @@
         b.style.left = pct(e.start, d);
         b.style.width = "calc(" + pct(Math.min(e.end, d) - e.start, d) + ")";
         b.title = "Эпизод " + (i + 1) + ": " + fmtTime(e.start) + " – " + fmtTime(e.end);
+        if (e.weak) b.classList.add("is-weak");
         b.addEventListener("click", function (ev) { ev.stopPropagation(); jumpTo(e.timecode, i, "timeline"); });
         tlTrack.insertBefore(b, tlHead);
         bands[i] = b;
       }
-      var m = el("button", "tl-mark", String(i + 1));
+      var m = el("button", "tl-mark" + (e.weak ? " is-weak" : ""), String(i + 1));
       m.type = "button";
       m.style.left = pct(e.timecode, d);
-      m.setAttribute("aria-label", "Эпизод " + (i + 1) + ", " + fmtTime(e.timecode) + ": перейти");
+      m.setAttribute("aria-label", "Эпизод " + (i + 1) + (e.weak ? " (слабый сигнал)" : "") + ", " + fmtTime(e.timecode) + ": перейти");
       m.addEventListener("click", function () { jumpTo(e.timecode, i, "timeline"); });
       tlMarks.appendChild(m);
       marks[i] = m;

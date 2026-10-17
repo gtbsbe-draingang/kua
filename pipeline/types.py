@@ -33,6 +33,10 @@ class Event:
     p_rules: dict[str, float | None] | None = None  # multi check: P(YES) per rule (None = no answer); None = not run
     citation: dict | None = None  # the judge's corpus citation {document, clause, quote, url}; None = the catalogue's
     judge_candidates: list[str] | None = None  # the rule ids offered to the judge, in order; None = no judge step
+    judge_violation: float | None = None  # the judge's own P(violation) for its accepted answer; None = not given
+    judge_text: str = ""  # the judge's justification as answered (debug only: `justification` may hold the catalogue's)
+    weak: bool = False  # the judge's P(violation) is below the judge_weak threshold: `justification` is the
+    # catalogue's hedged text and the event is shown as a weak signal. Detection and verdict do not change.
 
 
 @dataclass

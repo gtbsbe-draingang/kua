@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # The API (api:app under uvicorn from env/main, on 127.0.0.1:8000): the web UI, POST /api/v1/analyze and the video
-# pipeline (VideoJev in this process, InternVideo3 on the four replicas, the RAG server as the judge). The public
-# URL (tunnel.sh) forwards to it. Runs offline with every cache inside the root (env.sh).
+# pipeline (InternVideo3 on the four replicas, the RAG server as the judge; VideoJev in this process only for the
+# cells and segments generators). The public URL (tunnel.sh) forwards to it. Runs offline with every cache inside
+# the root (env.sh).
 #
-#   bash api_server.sh start    start the API in the background and return once its process is up. It loads VideoJev
-#                               onto the GPU before it opens the port, which takes a while: poll `status`.
-#                               Refuses when something already listens on the port.
+#   bash api_server.sh start    start the API in the background and return once its process is up. With the grid
+#                               generator (thresholds.json) VideoJev is skipped, so /healthz answers in about 5 s;
+#                               the cells and segments generators load it onto the GPU before the port opens,
+#                               which takes a while. Poll `status`. Refuses when something already listens on
+#                               the port.
 #   bash api_server.sh status   pid and GET /healthz. Exit 0 healthy, 3 running but not ready, 1 not running.
 #   bash api_server.sh stop     TERM the server named in logs/api.pid (after checking that the process is uvicorn
 #                               running api:app on port 8000), KILL after 60 s. A server started by hand is stopped

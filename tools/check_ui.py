@@ -16,8 +16,9 @@ Needs ffmpeg (clip and one JPEG frame for the synthetic events) and Google Chrom
 
 The first scenario runs the server's real answer end to end (upload, status, result, seek, reload with #job=) and
 compares the page with the API's own JSON, so it holds for the stub and for a real pipeline (one real job; raise
---timeout). Every other state (several events, a dense cluster of 16 markers, clean, failed, slow stages, 413,
-503s, unsafe source links, a result without the split fields, an unplayable video, the 6-minute cap) is produced in
+--timeout). Every other state (several events, weak-signal events, a dense cluster of 16 markers, clean, failed,
+slow stages, 413, 503s, unsafe source links, a result without the split fields, an unplayable video, the 6-minute
+cap) is produced in
 the browser by answering the page's requests with page.route, reusing the first job's id and video URL, so no
 further job is started. Exit code 0 when every check passes.
 """
@@ -70,7 +71,7 @@ def frame_b64(clip: Path, t: float) -> str:
     return base64.b64encode(jpg).decode("ascii")
 
 
-def event(tc, ts, te, src, frames, n, url="https://adilet.zan.kz/rus/docs/V0000000000", split=True):
+def event(tc, ts, te, src, frames, n, url="https://adilet.zan.kz/rus/docs/V0000000000", split=True, weak=None):
     ev = {
         "type": f"{NOTE} Тип события {n}",
         "timecode_sec": round(tc, 1),
@@ -85,6 +86,8 @@ def event(tc, ts, te, src, frames, n, url="https://adilet.zan.kz/rus/docs/V00000
         ev.update({"observation": f"{NOTE} Что видно в событии {n}.",
                    "justification": f"{NOTE} Почему событие {n} может быть нарушением.",
                    "type_source": src, "t_start": round(ts, 1), "t_end": round(te, 1)})
+        if weak is not None:  # a result from before the field existed has no weak_signal at all
+            ev["weak_signal"] = weak
     return ev
 
 
@@ -140,6 +143,12 @@ def main() -> int:
         # ---------- 1. the server's own answer, end to end ----------
         ctx, page, errs = new_page()
         ok("styles applied", page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(14, 11, 21)")
+        index = ctx.request.get(base + "/")
+        ok("GET / is served with Cache-Control: no-cache", index.headers.get("cache-control") == "no-cache",
+           index.headers.get("cache-control"))
+        refs = page.evaluate("""[...document.querySelectorAll('link[rel=stylesheet], script[src]')]
+                                  .map(e => e.getAttribute('href') || e.getAttribute('src'))""")
+        ok("page assets are versioned ?v=3", len(refs) == 3 and all(r.endswith("?v=3") for r in refs), refs)
         ok("key restored and masked", page.input_value("#key") == a.key and page.get_attribute("#key", "type") == "password")
         page.click("#key-toggle")
         ok("key show/hide", page.get_attribute("#key", "type") == "text" and page.get_attribute("#key-toggle", "aria-pressed") == "true")
@@ -169,8 +178,11 @@ def main() -> int:
             ok(f"card {k + 1}: source link only for an official https URL", (links.count() == 1) == (want is not None)
                and (want is None or links.inner_text().strip() == f"Открыть на {want}"), v.get("rule", {}).get("url"))
             if "type_source" in v:
-                tag = {"judge": "оценка модели", "fallback": "по каталогу"}.get(v["type_source"])
+                weak = v.get("weak_signal") is True
+                tag = "слабый сигнал" if weak else {"judge": "оценка модели", "fallback": "по каталогу"}.get(v["type_source"])
                 ok(f"card {k + 1}: source tag", card.locator(".tag").text_content() == tag)
+                ok(f"card {k + 1}: muted exactly when weak_signal", ("is-weak" in card.get_attribute("class")) == weak
+                   and ("is-weak" in page.locator(".tl-mark").nth(k).get_attribute("class")) == weak)
         ok("confidence not shown", page.evaluate("!/уверенност|confidence|вероятност/i.test(document.getElementById('events').textContent)"))
         video_ready(page)
         ok("video plays the server copy", "/video?token=" in page.evaluate("document.getElementById('video').currentSrc")
@@ -287,6 +299,71 @@ def main() -> int:
             ok(f"no page errors ({width}, three events)", not errs, "; ".join(errs))
             ctx.close()
 
+        # ---------- 2b. weak signal: a tag, a muted card and marker, the count line ----------
+        mixed = [event(d * 0.13, d * 0.03, d * 0.30, "judge", [(d * 0.13, frame), (d * 0.03, frame)], 1, weak=True),
+                 event(d * 0.43, d * 0.35, d * 0.55, "judge", [(d * 0.43, frame)], 2, weak=False),
+                 event(d * 0.82, d * 0.72, d * 0.97, "judge", [(d * 0.82, frame), (d * 0.72, frame)], 3, weak=True)]
+        for width in (1440, 390):
+            ctx, page, errs = new_page(width, 900 if width > 400 else 844)
+            fake_job(page, [done(mixed)])
+            upload(page)
+            expect(page.locator("#result")).to_be_visible(timeout=20000)
+            video_ready(page)
+            page.wait_for_timeout(300)
+            cards, marks = page.locator(".event-card"), page.locator(".tl-mark")
+            ok(f"weak: tags ({width})", page.locator(".event-card .tag").all_text_contents()
+               == ["слабый сигнал", "оценка модели", "слабый сигнал"])
+            ok(f"weak: the count line says how many are weak ({width})",
+               page.text_content("#verdict-meta") == "3 эпизода, из них 2 — слабый сигнал", page.text_content("#verdict-meta"))
+            ok(f"weak: the verdict wording is unchanged ({width})", page.text_content("#verdict-title") == V_TEXT["violation"])
+            flags = [True, False, True]
+            ok(f"weak: cards, markers and bands flagged alike ({width})",
+               cards.evaluate_all("a => a.map(x => x.classList.contains('is-weak'))") == flags
+               and marks.evaluate_all("a => a.map(x => x.classList.contains('is-weak'))") == flags
+               and page.locator(".tl-band").evaluate_all("a => a.map(x => x.classList.contains('is-weak'))") == flags)
+            ok(f"weak: marker label names the weak signal ({width})",
+               ["слабый сигнал" in (x or "") for x in marks.evaluate_all("a => a.map(x => x.getAttribute('aria-label'))")] == flags)
+            st = cards.evaluate_all("""a => a.map(x => { const c = getComputedStyle(x);
+                return [c.borderTopStyle, c.opacity, getComputedStyle(x.querySelector('.ev-text')).color,
+                        getComputedStyle(x.querySelector('.ev-no')).backgroundColor]; })""")
+            ok(f"weak: dashed border and a hollow number, normal opacity and text colour ({width})",
+               st[0][0] == st[2][0] == "dashed" and st[1][0] == "solid" and st[0][3] != st[1][3]
+               and {x[1] for x in st} == {"1"} and len({x[2] for x in st}) == 1, st)
+            mk = marks.evaluate_all("a => a.map(x => [getComputedStyle(x).backgroundColor, getComputedStyle(x).color])")
+            ok(f"weak: the marker is dimmed but its number stays readable ({width})", mk[0] == mk[2] != mk[1] and mk[0][0] != mk[0][1], mk)
+            ok(f"weak: the card still shows the event's justification and its frames ({width})",
+               cards.nth(0).locator(".ev-text").last.inner_text().startswith(NOTE) and cards.nth(0).locator(".frames img").count() == 2)
+            marks.nth(0).scroll_into_view_if_needed()
+            marks.nth(0).click()
+            page.wait_for_timeout(400)
+            ok(f"weak: a dimmed marker still seeks and highlights its card ({width})",
+               abs(page.evaluate("document.getElementById('video').currentTime") - round(d * 0.13, 1)) < 0.15
+               and "is-current" in cards.nth(0).get_attribute("class")
+               and cards.nth(0).evaluate("x => getComputedStyle(x).borderTopColor") == "rgb(109, 69, 230)")
+            cards.nth(2).locator(".tc-btn").click()
+            page.wait_for_timeout(400)
+            ok(f"weak: the card's timecode button still seeks ({width})",
+               abs(page.evaluate("document.getElementById('video').currentTime") - round(d * 0.82, 1)) < 0.15)
+            ok(f"weak: no horizontal scroll ({width})", no_hscroll(page))
+            shot(page, f"weak-result-{width}")
+            ok(f"weak: no page errors ({width})", not errs, "; ".join(errs))
+            ctx.close()
+
+        ctx, page, errs = new_page()
+        fake_job(page, [done([event(d * 0.2, d * 0.1, d * 0.3, "judge", [(d * 0.2, frame)], 1, weak=True),
+                              event(d * 0.7, d * 0.6, d * 0.8, "judge", [(d * 0.7, frame)], 2, weak=True)])])
+        upload(page)
+        expect(page.locator("#result")).to_be_visible(timeout=20000)
+        ok("weak: every episode weak -> count line", page.text_content("#verdict-meta") == "2 эпизода, из них 2 — слабый сигнал")
+        ctx.close()
+        ctx, page, errs = new_page()
+        fake_job(page, [done([event(d * 0.2, d * 0.1, d * 0.3, "judge", [(d * 0.2, frame)], 1, weak=False)])])
+        upload(page)
+        expect(page.locator("#result")).to_be_visible(timeout=20000)
+        ok("weak: none weak -> the plain count line and no muted element",
+           page.text_content("#verdict-meta") == "1 эпизод для проверки" and page.locator(".is-weak").count() == 0)
+        ctx.close()
+
         # ---------- 3. 16 events, clustered: every marker stays visible and clickable ----------
         tcs = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 1.50, 3.00, 4.20, 5.60, 5.70, 5.80, 5.90, 5.95]
         dense = [event(d * t / 6, max(0, d * t / 6 - 0.2), min(d, d * t / 6 + 0.2), "fallback", [(d * t / 6, frame)], n + 1)
@@ -347,6 +424,8 @@ def main() -> int:
         labels = page.locator(".event-card .ev-sec > .label").all_text_contents()
         ok("old result: description shown, split sections hidden", labels[0] == "Описание" and "Что видно" not in labels, labels)
         ok("old result: no source tag", page.locator(".event-card .tag").count() == 0)
+        ok("old result: no weak_signal means not weak", page.locator(".is-weak").count() == 0
+           and page.text_content("#verdict-meta") == "1 эпизод для проверки")
         ctx.close()
 
         # ---------- 6. clean, failed, slow stages, live region ----------
