@@ -23,19 +23,31 @@ VERIFY_FPS = 4
 CONNECT_TIMEOUT = 2.0  # an absent server fails fast
 OBSERVATION_MAX = 1000
 ROLES = "«кассир», «клиент» or «инкассатор»"
+GUIDANCE = f"""How to answer:
+- Use only what is visible in the clip. Do not guess amounts of money, documents, signatures, account postings or anything else that cannot be seen.
+- Do not name or try to identify any person, and do not describe faces or appearance. Refer to people only as {ROLES}."""
+OBSERVATION = "1-3 sentences in Russian about the visible actions only"
 
 VERIFY_TEMPLATE = """This is a short clip from a CCTV camera at a bank cash desk.
 Does the clip show ANY of these possible violations? The first one is the most likely, but answer YES if any one of them is clearly visible.
 {rules}
 
-How to answer:
-- Use only what is visible in the clip. Do not guess amounts of money, documents, signatures, account postings or anything else that cannot be seen.
-- Do not name or try to identify any person, and do not describe faces or appearance. Refer to people only as {roles}.
+{guidance}
 
 Reply in exactly this format, three lines:
 ANSWER: YES or ANSWER: NO
 TYPE: <the id of the violation you see, or none>
-OBSERVATION: <1-3 sentences in Russian about the visible actions only>"""
+OBSERVATION: <{observation}>"""
+
+MULTI_TEMPLATE = """This is a short clip from a CCTV camera at a bank cash desk.
+Answer each of these {n} questions about the clip with YES or NO. Answer YES only if it is clearly visible.
+{questions}
+
+{guidance}
+
+Reply in exactly this format, {lines} lines: one line per question in the same order, then the observation:
+{answers}
+OBSERVATION: <{observation}, including who is present (by role only) and where the cash is>"""
 
 JUDGE_SYSTEM = f"""You check one flagged moment from a CCTV camera at a bank cash desk and decide which rule it may violate. The result is only a hint for a human reviewer.
 - Use only facts stated in the observation or visible in the frames.
@@ -69,9 +81,22 @@ def _token(x) -> str:
 
 # ---- InternVideo3 check ------------------------------------------------------------------------
 
+def _question(rule: dict) -> str:
+    return " ".join(str(rule.get("verify_prompt") or "").split())
+
+
 def verify_prompt(rules: list[dict]) -> str:
-    lines = "\n".join(f"- {r['id']}: {' '.join(str(r.get('verify_prompt') or '').split())}" for r in rules)
-    return VERIFY_TEMPLATE.format(rules=lines, roles=ROLES)
+    lines = "\n".join(f"- {r['id']}: {_question(r)}" for r in rules)
+    return VERIFY_TEMPLATE.format(rules=lines, guidance=GUIDANCE, observation=OBSERVATION)
+
+
+def multi_prompt(rules: list[dict]) -> str:
+    """Every rule's verify_prompt as question k = 1, 2, ..., answered on a line "<k>. YES" or "<k>. NO"."""
+    n = len(rules)
+    return MULTI_TEMPLATE.format(
+        n=n, lines=n + 1, guidance=GUIDANCE, observation=OBSERVATION,
+        questions="\n".join(f"{k}. {_question(r)}" for k, r in enumerate(rules, 1)),
+        answers="\n".join(f"{k}. YES or {k}. NO" for k in range(1, n + 1)))
 
 
 def verify(window_path, rules: list[dict], timeout: float) -> tuple[float | None, str, str]:
@@ -98,6 +123,31 @@ def verify(window_path, rules: list[dict], timeout: float) -> tuple[float | None
     except Exception as e:
         log.warning("verify failed: %s", type(e).__name__)
         return None, "", ""
+
+
+def verify_multi(window_path, rules: list[dict], timeout: float) -> tuple[list[float | None], str]:
+    """One POST asks every rule (multi_prompt): (P(YES) per rule, aligned with rules; OBSERVATION).
+    An entry that is not a probability is None for its rule. ([None] * len(rules), "") on any other
+    failure, including a p_yes_list of the wrong length."""
+    try:
+        if not rules or not timeout or timeout <= 0:
+            return [None] * len(rules), ""
+        body = {"video_path": os.path.abspath(str(window_path)), "prompt": multi_prompt(rules),
+                "fps": VERIFY_FPS, "n_answers": len(rules)}
+        r = _post(os.environ.get("IV3_URL", IV3_URL), body, timeout)
+        if r.status_code != 200:
+            log.warning("verify_multi: HTTP %s", r.status_code)
+            return [None] * len(rules), ""
+        d = r.json()
+        ps = d.get("p_yes_list") if isinstance(d, dict) else None
+        if not isinstance(ps, list) or len(ps) != len(rules):
+            log.warning("verify_multi: reply without a p_yes_list of %d values", len(rules))
+            return [None] * len(rules), ""
+        obs = " ".join(str(d.get("observation") or "").split())[:OBSERVATION_MAX]
+        return [_prob(p) for p in ps], obs
+    except Exception as e:
+        log.warning("verify_multi failed: %s", type(e).__name__)
+        return [None] * len(rules), ""
 
 
 # ---- judge -------------------------------------------------------------------------------------

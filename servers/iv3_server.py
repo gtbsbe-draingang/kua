@@ -8,6 +8,11 @@ POST /verify {"video_path": str, "prompt": str, "fps": 4}
      -> {"p_yes": float, "type_id": str, "observation": str, "raw": str, ...}
      plus diagnostics: answer, yes_no_mass, frames, native_size, decoded_size,
      grid_thw, prompt_tokens, timings. Any error -> HTTP 500 {"error": "..."}.
+POST /verify {..., "n_answers": n} with 1 <= n <= 20, for a prompt of n numbered
+     YES/NO questions -> {"p_yes": float, "p_yes_list": [float | null] * n,
+     "observation": str, "raw": str, ...} plus frames, native_size, decoded_size,
+     grid_thw, prompt_tokens, timings. No answer line at all -> HTTP 500
+     {"error": "no answers"}.
 
 How a request is answered:
 - Frames: PyAV decodes the file and keeps, for each time k/fps (k = 0, 1, ...)
@@ -50,6 +55,13 @@ How a request is answered:
   "TYPE: <id>" and "OBSERVATION: <text>", parsed leniently. raw is "ANSWER:"
   plus the generated text. type_id is the model's word, lowercased; the server
   does not check it against the rule catalogue. The caller validates it.
+- n_answers: no prefill, so raw is the generated text alone. Greedy decoding of
+  up to 16 n + 200 new tokens, while a logits processor records
+  logsumexp(YES) - logsumexp(NO) over the same twelve tokens at every step.
+  Answer k is the sigmoid of that margin at the first YES/NO token that follows
+  a line start "<k>." or "<k>:" (answers_from_steps), null where the model wrote
+  no such line. p_yes is the max of the answers, so a client that reads only
+  p_yes still gets a number. observation is parsed as above.
 """
 from __future__ import annotations
 
@@ -85,6 +97,8 @@ SLOTS = threading.BoundedSemaphore(int(os.environ.get("IV3_SLOTS", "2")))
 PREFILL = "ANSWER:"
 YES = ("YES", " YES", "Yes", " Yes", "yes", " yes")
 NO = ("NO", " NO", "No", " No", "no", " no")
+YES_NO = frozenset(YES + NO)
+MAX_ANSWERS = 20
 
 torch.set_num_threads(4)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -252,14 +266,14 @@ def load() -> None:
              torch.cuda.memory_allocated() / 2**30)
 
 
-def build_inputs(frames: np.ndarray, info: dict, prompt: str):
+def build_inputs(frames: np.ndarray, info: dict, prompt: str, prefill: str = PREFILL):
     from transformers.video_utils import VideoMetadata
 
     if "<|" in prompt:
         raise ValueError("the prompt must not contain special tokens")
     processor = STATE["processor"]
     messages = [{"role": "user", "content": [{"type": "video"}, {"type": "text", "text": prompt}]}]
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) + PREFILL
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) + prefill
     n, h, w, _ = frames.shape
     meta = VideoMetadata(total_num_frames=info["decoded"], fps=info["src_fps"], width=w, height=h,
                          duration=info["duration"], video_backend="pyav",
@@ -297,6 +311,32 @@ def parse(raw: str) -> tuple[str, str, str]:
     return answer, type_id, observation
 
 
+ANSWER_LINE_RE = re.compile(r"[^\S\n]*(\d+)[.:][^\S\n]*")
+
+
+def sigmoid(x: float) -> float:
+    if x >= 0:
+        return 1.0 / (1.0 + math.exp(-x))
+    e = math.exp(x)
+    return e / (1.0 + e)
+
+
+def answers_from_steps(step_texts: list[str], step_margins: list[float], n: int) -> list[float | None]:
+    """P(YES) of answer lines 1..n from the generated tokens' texts and the YES/NO margin of each step.
+
+    Answer k is sigmoid(margin) at the first token that is a YES/NO variant and has only "<k>." or
+    "<k>:" before it on its line (spaces allowed around the number). The line is the joined text since
+    the last newline, so "12." may span several tokens. None where no such line was generated, or
+    where its margin is not finite."""
+    found: dict[int, float | None] = {}
+    line = ""
+    for text, margin in zip(step_texts, step_margins):
+        if text in YES_NO and (m := ANSWER_LINE_RE.fullmatch(line)) and 1 <= (k := int(m.group(1))) <= n:
+            found.setdefault(k, sigmoid(margin) if math.isfinite(margin) else None)
+        line = (line + text).rpartition("\n")[2]
+    return [found.get(k) for k in range(1, n + 1)]
+
+
 class FirstStepLogits(LogitsProcessor):
     """Copies the first generation step's scores to the CPU and passes them on.
     With greedy decoding and no penalties, these are the raw float32 logits of
@@ -311,11 +351,28 @@ class FirstStepLogits(LogitsProcessor):
         return scores
 
 
-def run_model(inputs, max_new_tokens: int = MAX_NEW_TOKENS) -> dict:
-    model, tok = STATE["model"], STATE["tok"]
+class AllStepsYesNo(LogitsProcessor):
+    """Records logsumexp(YES) - logsumexp(NO) of every generation step's scores and passes them on.
+    yes and no are the token ids on the scores' device; the margins stay there until margins()."""
+
+    def __init__(self, yes: torch.Tensor, no: torch.Tensor):
+        self.yes, self.no = yes, no
+        self.steps: list[torch.Tensor] = []
+
+    def __call__(self, input_ids, scores):
+        s = scores[0].detach().float()
+        self.steps.append(torch.logsumexp(s[self.yes], 0) - torch.logsumexp(s[self.no], 0))
+        return scores
+
+    def margins(self) -> list[float]:
+        return torch.stack(self.steps).cpu().tolist() if self.steps else []
+
+
+def generate(inputs, max_new_tokens: int, capture: LogitsProcessor) -> tuple[torch.Tensor, int]:
+    """Greedy decoding with capture as the only logits processor: (new token ids on the CPU, prompt tokens)."""
+    model = STATE["model"]
     inputs = inputs.to(model.device)
     prompt_tokens = int(inputs["input_ids"].shape[1])
-    capture = FirstStepLogits()
     try:
         with torch.inference_mode():
             out = model.generate(
@@ -325,12 +382,19 @@ def run_model(inputs, max_new_tokens: int = MAX_NEW_TOKENS) -> dict:
             )
         new_ids = out[0, prompt_tokens:].cpu()
         del out
-        first = capture.logits
-        if first is None:
-            raise RuntimeError("generate produced no step")
     finally:
         del inputs
         torch.cuda.empty_cache()  # the GPU is shared: give back what this request cached
+    return new_ids, prompt_tokens
+
+
+def run_model(inputs, max_new_tokens: int = MAX_NEW_TOKENS) -> dict:
+    tok = STATE["tok"]
+    capture = FirstStepLogits()
+    new_ids, prompt_tokens = generate(inputs, max_new_tokens, capture)
+    first = capture.logits
+    if first is None:
+        raise RuntimeError("generate produced no step")
     yes, no = first[STATE["yes"]], first[STATE["no"]]
     p_yes = float(torch.sigmoid(torch.logsumexp(yes, 0) - torch.logsumexp(no, 0)))
     if not math.isfinite(p_yes):
@@ -341,6 +405,21 @@ def run_model(inputs, max_new_tokens: int = MAX_NEW_TOKENS) -> dict:
     top5 = [(tok.decode([int(i)]), round(float(v.exp()), 4)) for v, i in zip(top.values, top.indices)]
     raw = PREFILL + tok.decode(new_ids, skip_special_tokens=True)
     return dict(p_yes=p_yes, yes_no_mass=mass, top5=top5, raw=raw,
+                prompt_tokens=prompt_tokens, new_tokens=int(new_ids.numel()))
+
+
+def run_model_multi(inputs, n: int) -> dict:
+    """The answers to an n-question prompt (built without prefill): p_yes_list from the YES/NO margin
+    at each answer line, and the generated text."""
+    tok, device = STATE["tok"], STATE["model"].device
+    capture = AllStepsYesNo(STATE["yes"].to(device), STATE["no"].to(device))
+    # 16 tokens per line "<k>. YES" (it takes about 5), and room for a 1-3 sentence OBSERVATION
+    new_ids, prompt_tokens = generate(inputs, 16 * n + 200, capture)
+    margins = capture.margins()
+    if len(margins) != len(new_ids):
+        raise RuntimeError(f"{len(margins)} recorded steps for {len(new_ids)} new tokens")
+    texts = tok.batch_decode([[int(i)] for i in new_ids], skip_special_tokens=True)
+    return dict(p_yes_list=answers_from_steps(texts, margins, n), raw=tok.decode(new_ids, skip_special_tokens=True),
                 prompt_tokens=prompt_tokens, new_tokens=int(new_ids.numel()))
 
 
@@ -371,6 +450,7 @@ class VerifyRequest(BaseModel):
     video_path: str
     prompt: str
     fps: float = 4.0
+    n_answers: int | None = None  # set: the prompt asks this many numbered YES/NO questions
 
 
 def error(message: str) -> JSONResponse:
@@ -390,11 +470,14 @@ def healthz():
 @app.post("/verify")
 def verify(req: VerifyRequest):
     t0 = time.perf_counter()
+    multi = req.n_answers is not None
     try:
         if not (0 < req.fps <= 30):
             raise ValueError(f"fps must be in (0, 30], got {req.fps}")
         if not req.prompt.strip():
             raise ValueError("empty prompt")
+        if multi and not (1 <= req.n_answers <= MAX_ANSWERS):
+            raise ValueError(f"n_answers must be in [1, {MAX_ANSWERS}], got {req.n_answers}")
         deadline = t0 + LOCK_TIMEOUT
         if not SLOTS.acquire(timeout=LOCK_TIMEOUT):
             raise TimeoutError(f"no free slot for {LOCK_TIMEOUT:.0f} s (other requests in progress)")
@@ -403,14 +486,14 @@ def verify(req: VerifyRequest):
             frames, info = decode_frames(req.video_path, req.fps)
             n_frames = len(frames)
             t2 = time.perf_counter()
-            inputs, grid = build_inputs(frames, info, req.prompt)
+            inputs, grid = build_inputs(frames, info, req.prompt, "" if multi else PREFILL)
             del frames
             t3 = time.perf_counter()
             if not LOCK.acquire(timeout=max(0.0, deadline - t3)):
                 raise TimeoutError(f"the model stayed busy for {LOCK_TIMEOUT:.0f} s")
             try:
                 t4 = time.perf_counter()
-                out = run_model(inputs)
+                out = run_model_multi(inputs, req.n_answers) if multi else run_model(inputs)
             finally:
                 LOCK.release()
             del inputs
@@ -425,6 +508,23 @@ def verify(req: VerifyRequest):
     answer, type_id, observation = parse(out["raw"])
     timings = dict(slot_wait=t1 - t0, decode=t2 - t1, preprocess=t3 - t2, wait=t4 - t3, model=t5 - t4,
                    total=t5 - t0)
+    if multi:
+        answers = out["p_yes_list"]
+        log.info("verify %s | %d frames decoded %sx%s (grid %s) | %d prompt + %d new tokens | answers %s | %s",
+                 os.path.basename(req.video_path), n_frames, info["size"][1], info["size"][0], grid,
+                 out["prompt_tokens"], out["new_tokens"],
+                 " ".join("-" if p is None else f"{p:.3f}" for p in answers),
+                 " ".join(f"{k} {v:.2f}s" for k, v in timings.items()))
+        known = [p for p in answers if p is not None]
+        if not known:
+            log.warning("verify %s: no answer line in %r", os.path.basename(req.video_path), out["raw"])
+            return error("no answers")
+        return {
+            "p_yes": max(known), "p_yes_list": answers, "observation": observation, "raw": out["raw"],
+            "frames": n_frames, "native_size": list(info["native"]), "decoded_size": list(info["size"]),
+            "grid_thw": grid, "prompt_tokens": out["prompt_tokens"],
+            "timings": {k: round(v, 3) for k, v in timings.items()},
+        }
     log.info("verify %s | %d frames %sx%s -> decoded %sx%s, processor resize %s (grid %s, drift %.3f s) | "
              "%d prompt + %d new tokens | p_yes %.4f answer %s type %s | yes_no_mass %.3f top5 %s | %s",
              os.path.basename(req.video_path), n_frames, info["native"][1], info["native"][0],

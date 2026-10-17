@@ -76,6 +76,27 @@ def test_verify_prompt_lists_rules_in_order_and_sets_the_format():
     assert "identify" in p and "amounts" in p
 
 
+def test_verify_prompt_text_is_pinned():
+    assert clients.verify_prompt(RULES) == (
+        "This is a short clip from a CCTV camera at a bank cash desk.\n"
+        "Does the clip show ANY of these possible violations? The first one is the most likely, but answer YES if "
+        "any one of them is clearly visible.\n"
+        "- cash_unattended: Does the cashier leave cash unattended?\n"
+        "- personal_items_at_workplace: Does the cashier use a phone?\n"
+        "- other: Is cash handled in an uncontrolled way?\n"
+        "\n"
+        "How to answer:\n"
+        "- Use only what is visible in the clip. Do not guess amounts of money, documents, signatures, account "
+        "postings or anything else that cannot be seen.\n"
+        "- Do not name or try to identify any person, and do not describe faces or appearance. Refer to people only "
+        "as «кассир», «клиент» or «инкассатор».\n"
+        "\n"
+        "Reply in exactly this format, three lines:\n"
+        "ANSWER: YES or ANSWER: NO\n"
+        "TYPE: <the id of the violation you see, or none>\n"
+        "OBSERVATION: <1-3 sentences in Russian about the visible actions only>")
+
+
 def test_verify_ok(server, monkeypatch, tmp_path):
     monkeypatch.setenv("IV3_URL", server.url + "/verify")
     server.reply = (200, {"p_yes": 0.73, "type_id": " `Cash_Unattended`.", "observation": " Кассир уходит. ",
@@ -86,6 +107,7 @@ def test_verify_ok(server, monkeypatch, tmp_path):
     path, body = server.requests[0]
     assert path == "/verify" and body["fps"] == 4 and body["video_path"] == str(w.resolve())
     assert body["prompt"] == clients.verify_prompt(RULES)
+    assert set(body) == {"video_path", "prompt", "fps"}  # no n_answers: the server's single mode
 
 
 @pytest.mark.parametrize("type_id,expected", [("none", "none"), ("NONE.", "none"), ("made_up", ""), (None, "")])
@@ -130,6 +152,54 @@ def test_verify_without_time_sends_nothing(server, monkeypatch):
     monkeypatch.setenv("IV3_URL", server.url + "/verify")
     assert clients.verify("/w.mp4", RULES, 0) == (None, "", "")
     assert server.requests == []
+
+
+# ---- verify, one answer per rule ----------------------------------------------------------
+
+def test_multi_prompt_numbers_every_rule():
+    rules = RULES + [{"id": "split", "verify_prompt": "Is the cash\n   drawer open?\n"}]
+    p = clients.multi_prompt(rules)
+    lines = p.splitlines()
+    questions = ["1. Does the cashier leave cash unattended?", "2. Does the cashier use a phone?",
+                 "3. Is cash handled in an uncontrolled way?", "4. Is the cash drawer open?"]
+    answers = ["1. YES or 1. NO", "2. YES or 2. NO", "3. YES or 3. NO", "4. YES or 4. NO"]
+    at = [lines.index(s) for s in questions + answers]
+    assert at == sorted(at) and at[4:] == list(range(at[4], at[4] + 4))
+    assert lines[at[-1] + 1].startswith("OBSERVATION: <1-3 sentences in Russian about the visible actions only")
+    assert lines[at[-1] + 1].endswith(">") and lines[at[-1] + 1] == lines[-1]
+    for s in ("who is present", "where the cash is", "«кассир»", "«клиент»", "«инкассатор»", "identify", "amounts"):
+        assert s in p, s
+    assert "<|" not in p and "ANSWER:" not in p and "TYPE:" not in p and "cash_unattended" not in p
+
+
+def test_verify_multi_aligns_and_handles_errors(server, monkeypatch, tmp_path):
+    monkeypatch.setenv("IV3_URL", server.url + "/verify")
+    w = tmp_path / "w.mp4"
+    w.write_bytes(b"x")
+    server.reply = (200, {"p_yes": 0.9, "p_yes_list": [0.9, None, 0.25], "observation": " Кассир  считает\nденьги. "})
+    assert clients.verify_multi(str(w), RULES, 10) == ([0.9, None, 0.25], "Кассир считает деньги.")
+    path, body = server.requests[0]
+    assert path == "/verify"
+    assert body == {"video_path": str(w.resolve()), "prompt": clients.multi_prompt(RULES), "fps": 4, "n_answers": 3}
+    server.reply = (200, {"p_yes_list": [0.9, 1.5, "high"], "observation": "o"})  # a bad value is None for its rule
+    assert clients.verify_multi(str(w), RULES, 10) == ([0.9, None, None], "o")
+    for reply in [(200, {"p_yes": 0.9, "p_yes_list": [0.9, 0.1], "observation": "o"}),  # wrong length
+                  (200, {"p_yes": 0.9, "p_yes_list": [0.9, 0.1, 0.2, 0.3]}), (500, {"error": "no answers"}),
+                  (200, b"not json"), (200, [0.9, 0.1, 0.2]), (200, {"p_yes": 0.9}),
+                  (200, {"p_yes_list": "0.9 0.1 0.2"})]:
+        server.reply = reply
+        assert clients.verify_multi(str(w), RULES, 10) == ([None, None, None], ""), reply
+
+
+def test_verify_multi_without_time_or_server(server, monkeypatch):
+    monkeypatch.setenv("IV3_URL", server.url + "/verify")
+    assert clients.verify_multi("/w.mp4", RULES, 0) == ([None, None, None], "")
+    assert clients.verify_multi("/w.mp4", [], 10) == ([], "")
+    assert server.requests == []
+    monkeypatch.setenv("IV3_URL", unused_url() + "/verify")
+    t = time.monotonic()
+    assert clients.verify_multi("/w.mp4", RULES, 30) == ([None, None, None], "")
+    assert time.monotonic() - t < 3
 
 
 # ---- judge --------------------------------------------------------------------------------
