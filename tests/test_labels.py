@@ -45,3 +45,32 @@ def test_dupes_absent_and_names_latin(rows):
 def test_constant_columns(rows):
     assert all(r["angle"] == "main" and r["source"] == "given" for r in rows)
     assert all(r["t_start"] == "" and r["t_end"] == "" and r["type_id"] == "" for r in rows)
+
+
+def _xlsx(tmp_path, rows):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["файл", "таймстемп", "вердикт"])
+    for r in rows:
+        ws.append(r)
+    p = tmp_path / "l.xlsx"
+    wb.save(p)
+    return p
+
+
+def test_violation_without_timestamp_raises(tmp_path):
+    x = _xlsx(tmp_path, [("X-1", None, "нарушение")])
+    with pytest.raises(ValueError, match="X-1"):
+        build_labels(x, tmp_path)
+
+
+def test_unrecognised_verdict_raises(tmp_path):
+    x = _xlsx(tmp_path, [("X-2", "5 секунда", "возможно")])
+    with pytest.raises(ValueError, match="X-2"):
+        build_labels(x, tmp_path)
+
+
+def test_verdict_case_whitespace_insensitive(tmp_path):
+    x = _xlsx(tmp_path, [("X-3", "5 секунда", " Нарушение "), ("X-4", None, "Без  нарушения")])
+    assert [(r["clip"], r["has_violation"]) for r in build_labels(x, tmp_path)] == [("X-3", 1), ("X-4", 0)]

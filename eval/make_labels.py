@@ -62,8 +62,13 @@ def build_labels(xlsx: Path, clips_dir: Path) -> list[dict]:
         clip = canon.get(orig, orig)
         note = f"merged from {orig}" if clip != orig else ""
         ev = events.setdefault(clip, [])
-        if str(verdict).strip().startswith("наруш") and ts:
+        v = " ".join(str(verdict or "").split()).lower()
+        if v == "нарушение":
+            if ts is None or not str(ts).strip():
+                raise ValueError(f"{orig}: verdict 'нарушение' without a timestamp")
             ev.append((parse_seconds(str(ts)), note))
+        elif v != "без нарушения":
+            raise ValueError(f"{orig}: unrecognised verdict {verdict!r}")
 
     rows = []
     for clip in sorted(events, key=clip_num):
