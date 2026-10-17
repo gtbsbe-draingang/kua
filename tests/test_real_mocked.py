@@ -669,10 +669,10 @@ def test_thresholds_strong_null_cells_keys_and_rejections(tmp_path):
         real._load_thresholds(p)
 
 
-def test_committed_thresholds_use_cells_without_strong():
+def test_committed_thresholds_use_grid_without_strong():
     # top_k 8 checks every cell of a clip up to 32 s; zoom and the per-rule check stay off until measured
     assert real._load_thresholds(ROOT / "thresholds.json") == {
-        "generator": "cells", "cell_sec": 4.0, "rank": "logit", "cand": 0.25, "verify": 0.05, "strong": None,
+        "generator": "grid", "cell_sec": 4.0, "rank": "logit", "cand": 0.25, "verify": 0.05, "strong": None,
         "fallback": 0.5, "top_k": 8, "merge_sec": 3, "anchor": "center", "anchor_offset_sec": 0,
         "zoom": False, "verify_mode": "single"}
 
@@ -877,3 +877,149 @@ def test_judge_citation_reaches_api(rig, clip, rules):
         v, = api.to_api("abc123def456", res, rules)["violations"]
         c = rules[v["type_id"]]["citations"][0]
         assert v["rule"] == {k: c.get(k, "") for k in CITATION}
+
+
+# ---- the grid generator: evenly spaced cells, no VideoJev ------------------------------------------------
+
+TH_GRID = {k: v for k, v in TH_CELLS.items() if k != "rank"} | {"generator": "grid"}
+
+
+@pytest.fixture
+def grid_rig(monkeypatch, tmp_path, rules):
+    r = setup_rig(monkeypatch, tmp_path, rules, TH_GRID)
+
+    def banned(*a, **k):
+        raise AssertionError("the grid generator must not touch VideoJev")
+    for name in ("ground", "choose"):
+        monkeypatch.setattr(real, name, banned)
+    monkeypatch.setattr(videojev, "get", banned)
+    return r
+
+
+def long_clip(tmp_path, seconds):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg missing")
+    import subprocess
+    d = tmp_path / f"long{seconds}"
+    d.mkdir()
+    out = d / "input.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=96x96:rate=5",
+                    "-t", str(seconds), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)], check=True)
+    return str(out)
+
+
+def test_grid_never_calls_videojev(grid_rig, tmp_path):
+    from pipeline.types import to_debug
+    stages = []
+    grid_rig.verdicts = {"other": (0.9, "none", "Кассир отходит.")}
+    res = real.analyze(long_clip(tmp_path, 20), time.time() + 240, stages.append)
+    assert len(res.events) == 5 and len(grid_rig.verify_calls) == 5
+    assert "grounding" not in stages
+    assert res.versions["videojev"] == "off" and res.versions["ground_fps"] == "off"
+    assert (res.generator, res.cell_sec, res.generator_fallback) == ("grid", 4.0, False)
+    assert all((e.rule_id, e.ground_score, e.rank) == ("other", 0.0, None) for e in res.events)
+    assert [e.timecode for e in res.events] == pytest.approx([2.0, 6.0, 10.0, 14.0, 18.0], abs=0.25)
+    assert {c["ids"][0] for c in grid_rig.verify_calls} == {"other"}
+    assert json.loads(json.dumps(to_debug(res)))["generator"] == "grid"
+
+
+def test_grid_long_clip_takes_top_k_even_cells(monkeypatch, tmp_path, rules):
+    from pipeline.logic import even_cells
+    grid_rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_GRID, "top_k": 8})
+    for name in ("ground", "choose"):
+        monkeypatch.setattr(real, name, lambda *a: pytest.fail("VideoJev call"))
+    path = long_clip(tmp_path, 70)
+    want = even_cells(probe(path)[0], 4.0, 8)
+    assert len(want) == 8
+    grid_rig.verdicts = {"other": (0.9, "none", "obs")}
+    res = real.analyze(path, time.time() + 240, lambda s: None)
+    assert [(e.t_start, e.t_end) for e in res.events] == [(c.t_start, c.t_end) for c in want]
+    assert len(grid_rig.verify_calls) == 8
+
+
+def test_grid_unanswered_cell_kept_recall_first(grid_rig, tmp_path):
+    path = long_clip(tmp_path, 20)
+    grid_rig.verdicts = {}  # no answer from InternVideo3: (None, "", "")
+    res = real.analyze(path, time.time() + 240, lambda s: None)
+    assert res.verdict == "violation"
+    assert {(e.kept, e.reason, e.ground_score, e.verify_score) for e in res.events} == {
+        (True, "fallback_no_vlm", 0.0, None)}
+    grid_rig.verdicts = {"other": (0.01, "none", "Ничего.")}  # answered below verify: rejected
+    res = real.analyze(path, time.time() + 240, lambda s: None)
+    assert res.verdict == "no_violation" and {e.reason for e in res.events} == {"rejected"}
+    n = len(grid_rig.verify_calls)
+    res = real.analyze(path, time.time() - 1, lambda s: None)  # no time for the check: still kept
+    assert len(grid_rig.verify_calls) == n and res.verdict == "violation"
+    assert {e.reason for e in res.events} == {"fallback_no_vlm"}
+
+
+def test_grid_single_mode_type_from_check(grid_rig, tmp_path, rules):
+    path = long_clip(tmp_path, 20)
+    for vtype, want, cands in (("cash_unattended", "cash_unattended", ["cash_unattended", "other"]),
+                               ("none", "other", ["other"]), ("bogus", "other", ["other"])):
+        grid_rig.verdicts = {"other": (0.9, vtype, "Кассир отходит.")}
+        grid_rig.judge_calls.clear()
+        res = real.analyze(path, time.time() + 240, lambda s: None)
+        assert {e.rule_id for e in res.events if e.kept} == {want}
+        assert grid_rig.judge_calls
+        assert all([c["id"] for c in j["candidates"]] == cands for j in grid_rig.judge_calls)
+
+
+def test_grid_multi_mode_type_and_judge_candidates(monkeypatch, tmp_path, rules):
+    from pipeline.logic import judge_candidates
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_GRID, "verify_mode": "multi"})
+    monkeypatch.setattr(real, "ground", lambda *a: pytest.fail("ground"))
+    monkeypatch.setattr(real, "choose", lambda *a: pytest.fail("choose"))
+    first = {"cash_unattended": 0.3, "previous_cash_on_desk": 0.8}
+    rig.multi = {0: (first, "obs")}
+    res = real.analyze(long_clip(tmp_path, 8), time.time() + 240, lambda s: None)  # two cells
+    a, b = res.events
+    assert (a.kept, a.rule_id, a.reason) == (True, "previous_cash_on_desk", "verified")
+    assert (b.kept, b.reason) == (True, "fallback_no_vlm")  # unanswered, kept
+    ids = [[c["id"] for c in j["candidates"]] for j in rig.judge_calls]
+    assert judge_candidates(first, "previous_cash_on_desk") in ids
+
+
+def test_warmup_skips_videojev_for_grid(monkeypatch, tmp_path):
+    th = tmp_path / "th.json"
+    th.write_text(json.dumps(TH_GRID))
+    monkeypatch.setenv("THRESHOLDS_PATH", str(th))
+    monkeypatch.setenv("RULES_PATH", str(ROOT / "rules.yaml"))
+    monkeypatch.setattr(real, "_CONFIG", None)
+
+    def banned():
+        raise AssertionError("warmup must not touch VideoJev for the grid generator")
+    monkeypatch.setattr(videojev, "get", banned)
+    real.warmup()
+    assert real._CONFIG is not None and real._CONFIG.th["generator"] == "grid"
+
+
+def test_thresholds_grid_needs_cell_sec(tmp_path):
+    p = tmp_path / "th.json"
+    p.write_text(json.dumps(TH_GRID))  # no rank: fine
+    assert real._load_thresholds(p)["generator"] == "grid"
+    p.write_text(json.dumps({k: v for k, v in TH_GRID.items() if k != "cell_sec"}))
+    with pytest.raises(ValueError, match="cell_sec"):
+        real._load_thresholds(p)
+    p.write_text(json.dumps({**TH_GRID, "cell_sec": 0}))
+    with pytest.raises(ValueError, match="cell_sec"):
+        real._load_thresholds(p)
+
+
+def test_grid_merge_keeps_best_verified_cell(monkeypatch, tmp_path, rules, clip):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_GRID, "zoom": True})
+    for name in ("ground", "choose"):
+        monkeypatch.setattr(real, name, lambda *a: pytest.fail("VideoJev call"))
+
+    def verify(window, rs, timeout):  # cell 0 unanswered, cell 1 answered
+        return (0.9, "none", "Кассир отходит.") if Path(window).stem == "window1" else (None, "", "")
+    monkeypatch.setattr(real, "verify", verify)
+    monkeypatch.setattr(zoom, "person_box", lambda p, s, e: (100, 100, 300, 500) if s > 0 else None)
+    res = real.analyze(clip, time.time() + 240, lambda s: None)  # cell centres 2 and 5 merge (merge_sec 3)
+    ev, = res.events
+    assert (ev.verify_score, ev.observation, ev.crop, ev.reason) == (
+        0.9, "Кассир отходит.", [100, 100, 300, 500], "verified")
+    assert (ev.t_start, ev.t_end) == (0.0, 6.0)
+    assert ev.timecode == ev.evidence[0].t == pytest.approx(5.0, abs=0.1)  # the second cell's evidence
+    j, = rig.judge_calls
+    assert j["observation"] == "Кассир отходит." and j["evidence"] == ev.evidence

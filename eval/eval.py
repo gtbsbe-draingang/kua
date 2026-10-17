@@ -264,7 +264,11 @@ def cmd_sweep(a, keep=None) -> int:
         print(f"sweep: the run mixes generators ({', '.join(gens)}); sweep one run at a time")
         return 2
     gen = gens[0]
-    cells = gen == "cells"
+    grid = gen == "grid"
+    cells = gen in ("cells", "grid")  # both: no cand mask, strong off
+    if grid:
+        print("sweep: grid run: events carry no rank, so top_k is not simulated (the run's own top_k is used); "
+              "a cell without an answer is kept at every verify")
     run_th = _run_thresholds(d for _, d in clips)
     base = json.loads(Path(a.out).read_text()) if Path(a.out).is_file() else dict(run_th)
     fallback = base.get("fallback", run_th.get("fallback", 0.5))
@@ -313,6 +317,11 @@ def cmd_sweep(a, keep=None) -> int:
         epf = [float(e) / f if f else None for e, f in zip(per_clip.sum(axis=1), nflag, strict=True)]
         return {"vr": vr, "found": found.sum(axis=1), "fp": fp, "acc": acc, "epf": epf}, found
 
+    def _kept(k, th) -> bool:
+        if grid:  # the pipeline keeps a grid cell InternVideo3 did not answer
+            return verify[k] is None or verify[k] >= th["verify"]
+        return _keep(keep, ground[k], verify[k], verify[k] is not None, th)
+
     strong_opts = [None] if cells else [None, *GRID]
     cand_opts = [None] if cells else GRID
     cand_mask = {c: np.ones(n, dtype=bool) if c is None else ground >= c - 1e-9 for c in cand_opts}
@@ -320,8 +329,7 @@ def cmd_sweep(a, keep=None) -> int:
     for s in strong_opts:
         for v in VERIFY_GRID:
             th = {**base, "verify": v, "strong": s, "fallback": fallback}
-            kd = np.array([_keep(keep, ground[k], verify[k], verify[k] is not None, th) for k in range(n)],
-                          dtype=bool)
+            kd = np.array([_kept(k, th) for k in range(n)], dtype=bool)
             combos = [(c, k) for c in cand_opts for k in ks]
             m, _ = score(np.stack([kd & cand_mask[c] & within[k] for c, k in combos]) if n
                          else np.zeros((len(combos), 0), dtype=bool))
@@ -369,8 +377,8 @@ def cmd_sweep(a, keep=None) -> int:
           f"found={int(bm['found'])}/{nv} fp_clips={int(bm['fp'])}/{n_clean} verdict_acc={bm['acc']:.3f} "
           f"events_per_flagged_clip={_cell(bm['epf'], '.2f')}")
     if int(bm["found"]) < nv:
-        kd = np.array([_keep(keep, ground[k], verify[k], verify[k] is not None,
-                             {**base, "verify": bv, "strong": bs, "fallback": fallback}) for k in range(n)], dtype=bool)
+        kd = np.array([_kept(k, {**base, "verify": bv, "strong": bs, "fallback": fallback}) for k in range(n)],
+                      dtype=bool)
         _, found = score((kd & cand_mask[bc] & within[bk])[None, :])
         missed = [names[ci] + (f" ({unusable[names[ci]]})" if names[ci] in unusable else "")
                   for j, ci in enumerate(viol_idx) if not found[0, j]]
