@@ -1,0 +1,35 @@
+# Everyday words from video observations -> the wording the acts use (the lexical query only).
+# The VLM says "кассир", "телефон", "посторонний"; the acts say "кассовый работник", "средства связи",
+# "третьи лица". BM25 only matches shared words, so when a query word starts with one of the `when`
+# prefixes, the `add` words are appended to the BM25 query. The dense (bge-m3) query is not changed.
+# Prefixes are lowercase (ё is written as е and matched at the start of a word, see rag/lexical.py).
+# Taken unchanged from the retrieval index of our teammates, who wrote it against their own dev queries:
+# add a term only when a real observation fails to find its clause, and keep each entry about word
+# meaning, never about one particular video.
+version: 1
+terms:
+  - when: [кассир, cashier, teller]
+    add: "кассовый работник"
+  - when: [смартфон, телефон, мобильн, гаджет, phone, smartphone, mobile]
+    add: "средства связи функции фото и видео фиксации"
+  - when: [посторонн, чужой, чужие, unauthori, stranger, outsider]
+    add: "посторонние лица третьи лица доступ"
+  - when: [инкассатор, collector]
+    add: "работник подразделения инкассации инкассатор-сборщик"
+  - when: [детектор, detector, counterfeit, подделк, фальшив, fake]
+    add: "проверка подлинности платежности защитные признаки"
+  - when: [ящик, drawer, тумб]
+    add: "специальные устройства закрывающиеся на ключ металлический шкаф сейф ящики стола"
+  - when: [уходит, уход, отходит, отошел, отлуча, leave, leaves, walks, away]
+    add: "покидать рабочее место"
+  - when: [кошел, сумочк, wallet, handbag, personal]
+    add: "личные вещи работников"
+  - when: [на виду, обзор, view, watched, publicly]
+    add: "просмотр третьими лицами"
+  - when: [хранилищ, vault]
+    add: "кладовая сейфовая комната"
+  # the acts call the cash area "кассовый узел" (Rules No. 231, п. 2 пп. 3)); people say "кассовое помещение", "кабинет"
+  - when: [кассовое помещ, кассового помещ, кассовом помещ, кассовые помещ, кассовых помещ, кабинет, cash room, cash office]
+    add: "кассовый узел"
+  - when: [средства связи, средств связи, средствами связи, ноутбук, laptop, планшет, tablet, компьютер, computer]
+    add: "средства связи функции фото и видео фиксации"

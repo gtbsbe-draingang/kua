@@ -11,8 +11,14 @@ On the pod (the RAG server on 127.0.0.1:30001; env/main):
     $MTA_ROOT/env/main/bin/python tools/rag_eval.py run --backend iv3 --dump DUMP.jsonl --out OUT.jsonl
         each record's clients.judge_request (no frames) to the RAG server through clients.judge_answer, as the
         pipeline sends it; records the answer, the HTTP status and the seconds. Serial, resumable.
-    $MTA_ROOT/env/main/bin/python tools/rag_eval.py recall [--queries tests/data/rag_queries.json]
-        retrieval recall@8 of the expected clause through /retrieve.
+    $MTA_ROOT/env/main/bin/python tools/rag_eval.py recall [--queries tests/data/rag_queries.json] [--ks 8,12]
+        retrieval recall@k and MRR of the expected clause through /retrieve (a query's "expect" is one clause id or a
+        list of them; the first expected clause found counts). The ranking is read to --depth (20, the server's
+        cap on k), so MRR counts a clause beyond that as missed.
+    $MTA_ROOT/env/main/bin/python tools/rag_eval.py recall --local [--modes dense,lexical,hybrid]
+        the same without the server: builds the index in this process (bge-m3 on the pod's GPU or CPU, the
+        running server untouched) and scores each mode on one dense matrix: dense (bge-m3 only), lexical (BM25 with
+        the glossary only) and hybrid (reciprocal rank fusion of the two). Refuses off the pod.
 
 On the Mac only (measurement stand-in, user decision 2026-10-17; the key comes from ANTHROPIC_API_KEY):
 
@@ -51,6 +57,9 @@ import verify_candidates as vc  # noqa: E402  (one implementation of the AUCs, n
 POD_HOME = Path("/home/jovyan")
 RAG_URL = "http://127.0.0.1:30001"
 TOP_K = 8  # rag.retrieve.TOP_K, what the server's chat endpoint searches
+RECALL_KS = (8, 12)
+RECALL_DEPTH = 20  # the largest k the server's /retrieve accepts
+RECALL_MODES = ("dense", "lexical", "hybrid")
 SONNET = "claude-sonnet-5-5"
 # $ per million tokens: input, output, cache read, cache write (5 min)
 PRICES = {SONNET: (2.00, 10.00, 0.20, 2.50)}
@@ -243,15 +252,93 @@ def cmd_run(a) -> int:
 
 # ---- recall ---------------------------------------------------------------------------------------
 
+def expected_ids(q: dict) -> list[str]:
+    """A query's expected clause ids: "expect" is one id or a list of them."""
+    e = q["expect"]
+    return [e] if isinstance(e, str) else list(e)
+
+
+def first_rank(ids: list[str], expect: list[str]) -> int | None:
+    """The 1-based rank of the first expected clause in ids, or None."""
+    return next((i for i, cid in enumerate(ids, 1) if cid in expect), None)
+
+
+def summarize_ranks(ranks: list[int | None], ks=RECALL_KS) -> dict:
+    """recall@k (the share of queries whose expected clause ranks within k), their counts and the mean reciprocal
+    rank (0 for a miss)."""
+    n = len(ranks)
+    out: dict = {"n": n, "mrr": sum(1 / r for r in ranks if r) / n if n else 0.0}
+    for k in ks:
+        hit = sum(1 for r in ranks if r is not None and r <= k)
+        out[f"hit@{k}"], out[f"recall@{k}"] = hit, hit / n if n else 0.0
+    return out
+
+
+def report_recall(queries: list[dict], rankers: dict, ks=RECALL_KS, echo=print) -> dict:
+    """Score every ranker (name -> text -> clause ids, best first) on the queries; one line per query with the rank
+    each ranker gave the expected clause, then one summary line per ranker. Returns {name: summary}."""
+    ranks: dict[str, list[int | None]] = {name: [] for name in rankers}
+    for q in queries:
+        expect = expected_ids(q)
+        cells = []
+        for name, rank in rankers.items():
+            r = first_rank(rank(q["text"]), expect)
+            ranks[name].append(r)
+            cells.append(f"{name} {r or '-':>2}")
+        echo(f"{'/'.join(expect)[:34]:<34} " + " | ".join(cells))
+    out = {name: summarize_ranks(rs, ks) for name, rs in ranks.items()}
+    for name, sm in out.items():
+        cols = " | ".join(f"recall@{k} {sm[f'hit@{k}']}/{sm['n']} = {sm[f'recall@{k}']:.3f}" for k in ks)
+        echo(f"{name:<8} {cols} | MRR {sm['mrr']:.3f}")
+    return out
+
+
+def mode_rankers(index, modes, depth: int) -> dict:
+    """text -> clause ids for each mode on one rag.retrieve.Index: dense and hybrid flip the index's switch around
+    the call, lexical reads the BM25 ranking."""
+    def ranker(mode: str):
+        def rank(text: str) -> list[str]:
+            if mode == "lexical":
+                return [h.clause_id for h in index.lexical_hits(text)[:depth]]
+            was, index.hybrid = index.hybrid, mode == "hybrid"
+            try:
+                return [h.clause_id for h in index.search(text, depth)]
+            finally:
+                index.hybrid = was
+        return rank
+    return {m: ranker(m) for m in modes}
+
+
+def local_index():
+    """The corpus indexed in this process with the real encoder, lexical channel included (the pod's env/main)."""
+    from rag.corpus import load_clauses
+    from rag.retrieve import Index
+
+    return Index(load_clauses(), hybrid=True)
+
+
 def cmd_recall(a) -> int:
     queries = json.loads(Path(a.queries).read_text(encoding="utf-8"))
-    hit = 0
-    for q in queries:
-        ids = [h["clause_id"] for h in retrieve(a.url, q["text"], a.k)]
-        rank = ids.index(q["expect"]) + 1 if q["expect"] in ids else None
-        hit += rank is not None
-        print(f"{q['expect']:<18} rank {rank or '-':>2} | top 3 {ids[:3]}")
-    print(f"recall@{a.k}: {hit}/{len(queries)} = {hit / len(queries):.3f}")
+    ks = tuple(int(k) for k in a.ks.split(","))
+    depth = max(a.depth, *ks)
+    if a.local:
+        if not on_pod():
+            print("rag_eval: recall --local loads bge-m3 and refuses to run off the pod (no /home/jovyan, no MTA_ROOT)",
+                  file=sys.stderr)
+            return 2
+        modes = [m.strip() for m in a.modes.split(",") if m.strip()]
+        bad = [m for m in modes if m not in RECALL_MODES]
+        if bad:
+            print(f"rag_eval: unknown mode {bad}; choose from {list(RECALL_MODES)}", file=sys.stderr)
+            return 2
+        index = local_index()
+        if not index.hybrid and any(m != "dense" for m in modes):
+            print("rag_eval: the lexical channel did not build (see the log above)", file=sys.stderr)
+            return 2
+        rankers = mode_rankers(index, modes, depth)
+    else:
+        rankers = {"server": lambda text: [h["clause_id"] for h in retrieve(a.url, text, depth)]}
+    report_recall(queries, rankers, ks)
     return 0
 
 
@@ -348,7 +435,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("recall")
     p.add_argument("--queries", default=str(SVC / "tests" / "data" / "rag_queries.json"))
     p.add_argument("--url", default=RAG_URL)
-    p.add_argument("--k", type=int, default=TOP_K)
+    p.add_argument("--ks", default=",".join(str(k) for k in RECALL_KS))
+    p.add_argument("--depth", type=int, default=RECALL_DEPTH)
+    p.add_argument("--local", action="store_true")
+    p.add_argument("--modes", default=",".join(RECALL_MODES))
     p = sub.add_parser("report")
     p.add_argument("--out", action="append", required=True)
     p.add_argument("--labels", default=str(SVC / "data" / "labels.csv"))
