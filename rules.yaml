@@ -1,43 +1,600 @@
+# Rules catalogue v1. Sources, editions and caveats: RULES.md.
+# Quotes are verbatim from the current adilet edition (edition_checked).
+# `limitation` (detectable: false rules only) is ignored by the loader; it feeds the README.
 version: 1
 rules:
+  # ---------------------------------------------------------------- catch-all
   - id: other
-    name: "Иное нарушение кассовых операций"
+    name: "Иное возможное нарушение порядка кассовых операций"
     seen_in_training: false
     detectable: true
     severity: medium
     omission: false
-    visual_criteria: ["cash or valuables are handled in a way that is not controlled by the cashier"]
-    never_claim: ["amount of cash", "whether the operation was posted", "identity of any person"]
+    visual_criteria:
+      - "cash or valuables are handled in a way that is not controlled by the cashier"
+      - "an action with cash that does not match normal acceptance, issuance or cash-collection steps"
+    never_claim: ["amount of cash", "whether the operation was posted", "identity of any person", "authenticity of banknotes"]
     grounding_queries:
       - "cash is left unattended on the desk"
       - "a person who is not the cashier reaches into the cash area"
+      - "the cashier handles banknotes carelessly and leaves them scattered"
+      - "cash changes hands outside the normal service at the cash desk"
     choice_option: "other irregularity in cash handling"
-    verify_prompt: "Does the video show cash being handled in a way that is not controlled by the cashier?"
-    why: "Действия с наличными выглядят не соответствующими порядку кассовых операций; требуется проверка сотрудником."
+    verify_prompt: "Does the video show cash being handled in a way that is not controlled by the cashier or does not follow normal cash-desk steps?"
+    why: "Действия с наличными выглядят не соответствующими порядку кассовых операций, что может указывать на нарушение Правил осуществления кассовых операций; требуется проверка сотрудником."
     citations:
-      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот и монет в банках второго уровня ..., утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
         clause: ""
-        quote: "TODO"
-        url: "https://adilet.zan.kz/rus/docs/"
-        edition_checked: "TODO"
+        quote: "определяют порядок осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680"
+        edition_checked: "2026-10-17"
+      - document: "Правила организации охраны и устройства помещений банков второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 24 февраля 2020 года № 14)"
+        clause: ""
+        quote: "определяют порядок организации охраны и устройства помещений банков второго уровня"
+        url: "https://adilet.zan.kz/rus/docs/V2000020075"
+        edition_checked: "2026-10-17"
 
+  # ---------------------------------------------------------------- cash left without control
   - id: cash_unattended
     name: "Оставление наличных без присмотра"
-    seen_in_training: true
+    seen_in_training: false
     detectable: true
     severity: high
     omission: false
-    visual_criteria: ["cash lies exposed on the desk", "cashier leaves or turns away"]
-    never_claim: ["amount of cash", "whether the operation was posted"]
+    visual_criteria:
+      - "cash lies exposed on the desk or counter"
+      - "the cashier walks away or turns away for a long time"
+      - "no employee keeps the exposed cash under control"
+    never_claim: ["amount of cash", "whether the operation was posted", "whether any cash went missing"]
     grounding_queries:
-      - "the cashier walks away leaving cash on the counter"
-      - "cash is left unattended on the desk"
+      - "the cashier walks away from the desk leaving banknotes on the counter"
+      - "cash is left lying on the desk with nobody at the workplace"
+      - "the cashier leaves the workplace without locking the cash away"
     choice_option: "cash left unattended"
-    verify_prompt: "Does the cashier leave cash unattended and out of their control?"
-    why: "Наличные оставлены без контроля кассира, что может указывать на нарушение требования о сохранности ценностей."
+    verify_prompt: "Does the cashier leave cash lying exposed on the desk while away from the workplace?"
+    why: "Наличные остаются открытыми на рабочем месте без контроля кассира, что может указывать на нарушение требования хранить ранее принятые наличные в закрывающихся на ключ устройствах на рабочем месте кассового работника."
     citations:
-      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот и монет в банках второго уровня ..., утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231"
-        clause: "п. __"
-        quote: "TODO"
-        url: "https://adilet.zan.kz/rus/docs/"
-        edition_checked: "TODO"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 20, ч. 2"
+        quote: "Все ранее принятые наличные деньги хранятся в специальных устройствах, находящихся на рабочем месте кассового работника, закрывающихся на ключ, предназначенных для хранения наличных денег (металлический шкаф, сейф, тележка, ящики стола, тумба)."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z112"
+        edition_checked: "2026-10-17"
+
+  - id: cashier_leaves_during_service
+    name: "Уход кассира с рабочего места во время обслуживания клиента"
+    seen_in_training: false
+    detectable: true
+    severity: high
+    omission: false
+    visual_criteria:
+      - "a client is at the cash desk and the transaction is not finished"
+      - "the cashier gets up and walks away from the workplace"
+      - "the client is left waiting, possibly with cash or documents on the counter"
+    never_claim: ["the reason the cashier left", "identity of any person", "whether the transaction was completed in the system"]
+    grounding_queries:
+      - "the cashier walks away from the desk while a client is still being served"
+      - "the cashier leaves the workplace in the middle of a transaction with a client waiting"
+      - "a client waits at the cash desk while the cashier is away"
+    choice_option: "cashier leaves the workplace during client service"
+    verify_prompt: "Does the cashier leave the workplace while a client is still being served?"
+    why: "Кассир покидает рабочее место, пока клиент ещё обслуживается, что может указывать на нарушение запрета покидать рабочее место до окончания обслуживания клиента."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 22"
+        quote: "Кассовому работнику не допускается покидать рабочее место до окончания обслуживания клиента."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z114"
+        edition_checked: "2026-10-17"
+
+  - id: previous_cash_on_desk
+    name: "Наличные от других операций на рабочем месте при обслуживании клиента"
+    seen_in_training: false
+    detectable: true
+    severity: medium
+    omission: false
+    visual_criteria:
+      - "while a client is served, other stacks of cash that are not part of this client's transaction lie open on the desk"
+      - "cash from earlier transactions is not put into a drawer, safe or cash box"
+      - "cash of different clients is mixed on the counter"
+    never_claim: ["amount of cash", "which client the cash belongs to", "whether the operation was posted"]
+    grounding_queries:
+      - "stacks of cash from earlier transactions lie open on the desk while the cashier serves the next client"
+      - "the cashier serves a new client with other banknotes still spread on the desk"
+      - "cash from a previous client is not put away before the next client is served"
+    choice_option: "cash from earlier transactions left out on the desk"
+    verify_prompt: "While serving a client, does the cashier keep other cash from earlier transactions lying open on the desk instead of in a drawer or safe?"
+    why: "На рабочем месте открыто лежат наличные, не относящиеся к текущей операции, что может указывать на нарушение требования держать на рабочем месте только наличные текущего клиента, а ранее принятые наличные хранить в запирающихся устройствах."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 20, ч. 2"
+        quote: "На рабочем месте кассового работника находятся наличные деньги клиента. Все ранее принятые наличные деньги хранятся в специальных устройствах, находящихся на рабочем месте кассового работника, закрывающихся на ключ, предназначенных для хранения наличных денег (металлический шкаф, сейф, тележка, ящики стола, тумба)."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z112"
+        edition_checked: "2026-10-17"
+
+  - id: cash_storage_left_open
+    name: "Хранилище наличных на рабочем месте оставлено открытым"
+    seen_in_training: false
+    detectable: true
+    severity: medium
+    omission: false
+    visual_criteria:
+      - "a cash drawer, safe, cash box or trolley holding cash is left open"
+      - "keys are left in the lock or lying on the desk"
+      - "the cashier is away or busy with something else while it stays open"
+    never_claim: ["amount of cash", "the bank's internal key-handling procedure", "whether anything was taken"]
+    grounding_queries:
+      - "the cash drawer is left open with banknotes inside while the cashier walks away"
+      - "the safe at the cashier's workplace stays open and unattended"
+      - "keys are left in the lock of the cash drawer"
+    choice_option: "cash drawer or safe left open, or keys left in the lock"
+    verify_prompt: "Is a cash drawer, safe or cash box left open, or are its keys left in the lock, while no one is controlling it?"
+    why: "Запирающееся хранилище наличных на рабочем месте оставлено открытым или с ключом в замке, что может указывать на нарушение требований о хранении наличных в закрывающихся на ключ устройствах и об исключении несанкционированного использования ключей."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 20, ч. 2"
+        quote: "Все ранее принятые наличные деньги хранятся в специальных устройствах, находящихся на рабочем месте кассового работника, закрывающихся на ключ, предназначенных для хранения наличных денег (металлический шкаф, сейф, тележка, ящики стола, тумба)."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z112"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 80"
+        quote: "Порядок хранения, выдачи и передачи ценностей, печатей, ключей и кодов от электронных и механических замков кладовой и (или) сейфовой комнаты, пломбираторов, клише, именных штампов и ключей от специальных устройств, находящихся на рабочем месте кассового работника, предназначенных для хранения наличных денег (металлический шкаф, сейф, тележка, ящики стола), определяется внутренними документами банка, обеспечивающими исключение их несанкционированного использования."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z226"
+        edition_checked: "2026-10-17"
+
+  - id: cash_into_personal_belongings
+    name: "Перемещение наличных в одежду или личные вещи"
+    seen_in_training: false
+    detectable: true
+    severity: high
+    omission: false
+    visual_criteria:
+      - "the cashier or another person puts banknotes into a pocket, sleeve, personal bag or wallet"
+      - "the cash does not go into the cash drawer, safe or a collection bag"
+      - "the movement may be done discreetly"
+    never_claim: ["intent or theft", "amount of cash", "identity of any person", "whether the cash was later returned"]
+    grounding_queries:
+      - "the cashier slips banknotes into a pocket"
+      - "the cashier puts cash into a personal bag"
+      - "a banknote is hidden in clothing instead of being put in the cash drawer"
+    choice_option: "cash put into a pocket or personal bag"
+    verify_prompt: "Does anyone put banknotes into a pocket, clothing or a personal bag instead of the cash drawer or safe?"
+    why: "Наличные перемещаются в карман, одежду или личную сумку, что может указывать на нарушение требований о хранении принятых наличных в специальных устройствах на рабочем месте и о хранении личных наличных денег работников вне кассового узла."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 20, ч. 2"
+        quote: "Все ранее принятые наличные деньги хранятся в специальных устройствах, находящихся на рабочем месте кассового работника, закрывающихся на ключ, предназначенных для хранения наличных денег (металлический шкаф, сейф, тележка, ящики стола, тумба)."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z112"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 12, ч. 1"
+        quote: "Хранение личных вещей, наличных денег и ценностей работников банка осуществляется вне кассового узла в порядке, установленном внутренними документами банка."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z81"
+        edition_checked: "2026-10-17"
+
+  - id: personal_items_at_workplace
+    name: "Личные вещи или смартфон на рабочем месте кассира"
+    seen_in_training: false
+    detectable: true
+    severity: low
+    omission: false
+    visual_criteria:
+      - "the cashier uses a smartphone at the cash workplace"
+      - "the cashier photographs or films with a phone at the desk"
+      - "a personal handbag, wallet or other personal items are on the cash desk"
+    never_claim: ["what the phone was used for", "contents of the phone screen", "who owns the items"]
+    grounding_queries:
+      - "the cashier uses a mobile phone at the cash desk"
+      - "the cashier takes photos with a smartphone at the workplace"
+      - "a personal handbag lies on the cashier's desk"
+    choice_option: "personal phone or personal items at the cash workplace"
+    verify_prompt: "Does the cashier use a smartphone or keep personal items such as a handbag at the cash workplace?"
+    why: "На рабочем месте кассира видны личные вещи или используется смартфон, что может указывать на нарушение требования хранить личные вещи работников вне кассового узла (допускаются только средства связи без функции фото- и видеофиксации)."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 12, ч. 1"
+        quote: "Хранение личных вещей, наличных денег и ценностей работников банка осуществляется вне кассового узла в порядке, установленном внутренними документами банка."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z81"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 12, ч. 2"
+        quote: "Допускается внос работниками банка в кассовый узел лекарственных средств, медицинских изделий и средств связи, не имеющих функции фото и видео фиксации."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z490"
+        edition_checked: "2026-10-17"
+
+  # ---------------------------------------------------------------- counting
+  - id: deposit_not_counted
+    name: "Приём наличных без пересчёта"
+    seen_in_training: false
+    detectable: true
+    severity: high
+    omission: true
+    visual_criteria:
+      - "the client hands over banknotes or coins"
+      - "the cashier puts the cash straight into a drawer, safe or bag"
+      - "no sheet-by-sheet hand count and no counting machine is used for that cash"
+    never_claim: ["amount of cash", "authenticity or payability of the banknotes", "whether the amount matches the document", "whether the operation was posted"]
+    grounding_queries:
+      - "the cashier takes cash from the client and puts it away without counting it"
+      - "the cashier puts the client's banknotes straight into the drawer without counting"
+      - "a stack of banknotes is accepted without being counted by hand or by machine"
+    choice_option: "cash accepted without counting"
+    verify_prompt: "Does the cashier accept the client's cash and put it away without counting it by hand or by machine?"
+    why: "Наличные клиента убраны без видимого пересчёта, что может указывать на нарушение требования принимать банкноты с полистным пересчётом в присутствии клиента."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 19, подп. 2)"
+        quote: "принимает банкноты с полистным пересчетом, монеты с пересчетом по кружкам с проверкой на подлинность и платежность наличных денег в соответствии с пунктами 57 и 58 Правил"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z445"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 20, ч. 1"
+        quote: "Наличные деньги принимаются и пересчитываются кассовым работником в присутствии клиента."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z111"
+        edition_checked: "2026-10-17"
+
+  - id: deposit_counted_without_client
+    name: "Пересчёт принимаемых наличных вне присутствия клиента"
+    seen_in_training: false
+    detectable: true
+    severity: medium
+    omission: false
+    visual_criteria:
+      - "the cashier takes the client's cash away from the counter before counting it"
+      - "the cash is counted only after the client has left"
+      - "the client cannot see the counting"
+    never_claim: ["amount of cash", "whether the count was correct", "identity of any person"]
+    grounding_queries:
+      - "the cashier carries the client's cash away from the counter to count it elsewhere"
+      - "the cashier counts the deposited cash after the client has left"
+      - "the client leaves before the cashier counts the money"
+    choice_option: "deposited cash counted without the client present"
+    verify_prompt: "Is the client's cash counted only after the client has left, or out of the client's sight?"
+    why: "Пересчёт принимаемых наличных происходит без клиента, что может указывать на нарушение требования принимать и пересчитывать наличные в присутствии клиента."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 20, ч. 1"
+        quote: "Наличные деньги принимаются и пересчитываются кассовым работником в присутствии клиента."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z111"
+        edition_checked: "2026-10-17"
+
+  - id: withdrawal_not_counted
+    name: "Выдача наличных без пересчёта в присутствии клиента"
+    seen_in_training: false
+    detectable: true
+    severity: high
+    omission: true
+    visual_criteria:
+      - "the cashier hands cash to the client"
+      - "loose banknotes or an opened or partial bundle are handed over without being counted in front of the client"
+      - "a full bundle in intact bank wrapping is not a violation: it may be issued by the amount on the wrapper without a sheet count"
+    never_claim: ["amount of cash", "whether the amount matches the document", "whether a wrapped bundle is complete"]
+    grounding_queries:
+      - "the cashier hands loose banknotes to the client without counting them"
+      - "the cashier gives cash to the client without recounting it in front of the client"
+      - "cash is passed to the client straight from the drawer without counting"
+    choice_option: "cash issued without counting in front of the client"
+    verify_prompt: "Does the cashier hand loose or unwrapped cash to the client without counting it in front of the client?"
+    why: "Наличные переданы клиенту без видимого пересчёта при клиенте, что может указывать на нарушение требования пересчитывать подготовленные к выдаче наличные в присутствии клиента."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 31, подп. 4)"
+        quote: "пересчитывает подготовленные к выдаче наличные деньги в присутствии клиента, выдает клиенту наличные деньги"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z454"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 32, ч. 1"
+        quote: "Банкноты из неполных, а также поврежденных корешков выдаются кассовым работником полистным пересчетом."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z150"
+        edition_checked: "2026-10-17"
+
+  - id: recount_without_controller
+    name: "Пересчёт, сортировка или упаковка наличных без контролирующего работника"
+    seen_in_training: false
+    detectable: true
+    severity: low
+    omission: true
+    visual_criteria:
+      - "no client is being served"
+      - "the cashier counts, sorts, bands or packs cash"
+      - "no second employee watches the counting"
+    never_claim: ["whether a controlling employee watches from outside the frame", "whether the counting is part of preparing a client's withdrawal", "amount of cash"]
+    grounding_queries:
+      - "the cashier alone counts and bands stacks of banknotes with no other employee present"
+      - "the cashier packs cash into bundles without anyone supervising"
+      - "the cashier sorts banknotes alone when no client is at the desk"
+    choice_option: "cash counted or packed without a second employee"
+    verify_prompt: "With no client being served, does the cashier count, sort or pack cash alone without a second employee watching?"
+    why: "Кассир пересчитывает, сортирует или упаковывает наличные без второго работника, что может указывать на нарушение требования проводить такие операции в присутствии контролирующего работника."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 42"
+        quote: "Кассовые операции по пересчету, сортировке и упаковке наличных денег осуществляются кассовым работником в присутствии контролирующего работника, за исключением случаев совершения кассовых операций по приему и выдаче наличных денег клиенту."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z163"
+        edition_checked: "2026-10-17"
+
+  # ---------------------------------------------------------------- access to the cash area
+  - id: unauthorized_person_in_cash_area
+    name: "Доступ постороннего лица в зону кассы"
+    seen_in_training: false
+    detectable: true
+    severity: high
+    omission: false
+    visual_criteria:
+      - "a person who is not the cashier (a client or another visitor) enters the cashier's workspace"
+      - "a client reaches across the counter and takes or touches cash, drawers or documents on the cashier's side"
+      - "the cashier does not stop it"
+    never_claim: ["identity or job role of the person beyond what is visible", "whether the person had written authorisation", "amount of cash"]
+    grounding_queries:
+      - "a client walks into the cashier's workspace"
+      - "a person who is not the cashier takes cash from the cashier's desk"
+      - "a client reaches across the counter into the cash drawer"
+    choice_option: "unauthorised person enters the cash area or reaches into it"
+    verify_prompt: "Does a person who is not the cashier enter the cashier's workspace or reach into the cash area and touch cash?"
+    why: "Лицо, не являющееся кассиром, проникает в зону кассы или к наличным на стороне кассира, что может указывать на нарушение требований об изолированности кассового узла и кассы."
+    citations:
+      - document: "Правила организации охраны и устройства помещений банков второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 24 февраля 2020 года № 14)"
+        clause: "п. 8, ч. 1"
+        quote: "Кассовый узел подлежит изолированию от других производственных, подсобных, подвальных и служебных помещений одним закрывающимся служебным входом."
+        url: "https://adilet.zan.kz/rus/docs/V2000020075#z49"
+        edition_checked: "2026-10-17"
+      - document: "Правила организации охраны и устройства помещений банков второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 24 февраля 2020 года № 14)"
+        clause: "п. 16, подп. 1)"
+        quote: "каждая касса имеет отдельный вход с закрывающейся на замок дверью"
+        url: "https://adilet.zan.kz/rus/docs/V2000020075#z121"
+        edition_checked: "2026-10-17"
+
+  # ---------------------------------------------------------------- cash collection
+  - id: collection_cash_not_in_sealed_bag
+    name: "Передача наличных инкассатору без опломбированной сумки"
+    seen_in_training: false
+    detectable: true
+    severity: high
+    omission: false
+    visual_criteria:
+      - "cash is handed between the cashier and a cash collector as loose banknotes or open bundles"
+      - "the collection bag is open, not tied or has no seal when it is handed over"
+      - "cash is put into the bag after the handover and the bag is not sealed"
+    never_claim: ["amount of cash", "contents of the accompanying document", "seal number or whether the seal matches the specimen"]
+    grounding_queries:
+      - "the cashier hands loose banknotes to the cash collector without a bag"
+      - "the cash collector receives cash in an open unsealed bag"
+      - "cash is passed to the cash collector without being packed and sealed"
+    choice_option: "cash handed to a cash collector without a sealed bag"
+    verify_prompt: "Is cash handed between the cashier and a cash collector loose or in an open, unsealed bag?"
+    why: "Наличные передаются при инкассации не в опломбированной сумке, что может указывать на нарушение требований об упаковке инкассируемых наличных в сумки, не позволяющие вскрыть их без видимых следов."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 105"
+        quote: "Банкноты, монеты и ценности, подлежащие инкассации, упаковываются в сумки с составлением препроводительного документа."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z287"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 93, ч. 1"
+        quote: "используют сумки, обеспечивающие сохранность банкнот, монет и ценностей и не позволяющие осуществить их вскрытие без видимых следов нарушения целостности"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z258"
+        edition_checked: "2026-10-17"
+
+  - id: collection_bag_not_inspected
+    name: "Приём инкассаторской сумки без проверки целостности и пломбы"
+    seen_in_training: false
+    detectable: true
+    severity: medium
+    omission: true
+    visual_criteria:
+      - "a cash collector and the cashier exchange a collection bag"
+      - "the receiving side puts the bag away or opens it without looking at the bag and its seal"
+      - "no visible inspection of the seal, the twine or the bag's integrity"
+    never_claim: ["whether the seal matches the specimen", "seal number", "contents of the accompanying document", "amount of cash"]
+    grounding_queries:
+      - "the cashier takes the collection bag from the cash collector without checking the seal"
+      - "the cash collector takes the bag from the cashier without inspecting it"
+      - "a sealed bag is opened immediately without checking its seal"
+    choice_option: "collection bag accepted without checking its seal"
+    verify_prompt: "Does the cashier or the cash collector accept a collection bag without visibly checking its seal and integrity?"
+    why: "Инкассаторская сумка принята без видимой проверки целостности и пломбы, что может указывать на нарушение требований проверять целостность сумки и правильность её пломбирования."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 24, ч. 2, подп. 3)"
+        quote: "проверяет целостность сумки"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z121"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 24, ч. 2, подп. 4)"
+        quote: "проверяет правильность пломбирования сумки"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z122"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 107, подп. 2)"
+        quote: "правильность пломбирования (целостность шпагата, на котором закреплена пломба, ясность оттиска пломбиратора, тождественность его образцу)"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z300"
+        edition_checked: "2026-10-17"
+
+  # ================================================================ not detectable from video
+  - id: client_identification
+    name: "Идентификация клиента и надлежащая проверка"
+    seen_in_training: false
+    detectable: false
+    severity: medium
+    omission: true
+    visual_criteria: []
+    never_claim: ["identity of any person"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: идентификация допускается по данным сервиса цифровых документов на экране кассира, а распознавание лиц сервису запрещено."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 19, подп. 1)"
+        quote: "проводит визуальную идентификацию клиента, вносящего наличные деньги, с документом, удостоверяющим его личность, либо данными, подтверждающими (идентифицирующими) личность клиента, полученными посредством сервиса цифровых документов"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z444"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 7"
+        quote: "Кассовые операции по приему и выдаче наличных денег банк осуществляет после принятия мер по надлежащей проверке"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z76"
+        edition_checked: "2026-10-17"
+
+  - id: signatures_and_document_details
+    name: "Подписи и реквизиты кассовых документов"
+    seen_in_training: false
+    detectable: false
+    severity: low
+    omission: true
+    visual_criteria: []
+    never_claim: ["contents of any document"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: наличие и подлинность подписей, их сверка с образцами и реквизиты документа не читаются с камеры."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 19, подп. 3)"
+        quote: "проверяет наличие подписи клиента и при участии операционного работника наличие его подписи, сверяет их с имеющимися образцами подписей"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z446"
+        edition_checked: "2026-10-17"
+
+  - id: amount_matches_document
+    name: "Соответствие суммы кассовому документу"
+    seen_in_training: false
+    detectable: false
+    severity: medium
+    omission: true
+    visual_criteria: []
+    never_claim: ["amount of cash", "whether the amount matches the document"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: сумму наличных и сумму в документе нельзя надёжно определить с камеры."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 19, подп. 4)"
+        quote: "сверяет соответствие суммы, указанной в приходном кассовом документе, с общей суммой фактически принятых наличных денег"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z447"
+        edition_checked: "2026-10-17"
+
+  - id: posting_to_client_account
+    name: "Зачисление принятых наличных на счёт клиента"
+    seen_in_training: false
+    detectable: false
+    severity: medium
+    omission: true
+    visual_criteria: []
+    never_claim: ["whether the operation was posted"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: зачисление и корректность проводки видны только в учётной системе банка."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 26, ч. 1"
+        quote: "Наличные деньги, принятые от клиента в течение рабочего дня зачисляются на банковские счета клиентов в тот же рабочий день."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z125"
+        edition_checked: "2026-10-17"
+
+  - id: banknote_authenticity_check
+    name: "Проверка подлинности и платёжности банкнот"
+    seen_in_training: false
+    detectable: false
+    severity: medium
+    omission: true
+    visual_criteria: []
+    never_claim: ["authenticity or payability of the banknotes"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: подлинность и платёжность банкнот и результат проверки на оборудовании с камеры не определяются."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 57"
+        quote: "Банк при осуществлении кассовых операций проверяет платежность банкнот и монет в соответствии с Правилами № 230."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z196"
+        edition_checked: "2026-10-17"
+
+  - id: suspicious_banknotes_procedure
+    name: "Порядок работы с сомнительными и поддельными банкнотами"
+    seen_in_training: false
+    detectable: false
+    severity: medium
+    omission: true
+    visual_criteria: []
+    never_claim: ["authenticity or payability of the banknotes"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: нельзя установить, что банкнота сомнительная или имеет признаки подделки, и проверить составление акта."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 61"
+        quote: "Банкноты и монеты, имеющие признаки подделки, клиенту не возвращаются, сумма принятых банкнот и монет на банковский счет клиента не зачисляется."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z204"
+        edition_checked: "2026-10-17"
+
+  - id: cash_transfer_between_cashiers_record
+    name: "Оформление передачи наличных между кассовыми работниками"
+    seen_in_training: false
+    detectable: false
+    severity: low
+    omission: true
+    visual_criteria: []
+    never_claim: ["contents of any document", "amount of cash"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: факт и содержание записи в документе учёта передачи наличных с камеры не устанавливаются."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 15"
+        quote: "Передача наличных денег между кассовыми работниками банка отражается в документе учета принятых и выданных наличных денег и ценностей"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z84"
+        edition_checked: "2026-10-17"
+
+  - id: end_of_day_reconciliation
+    name: "Сверка наличных в конце рабочего дня"
+    seen_in_training: false
+    detectable: false
+    severity: low
+    omission: true
+    visual_criteria: []
+    never_claim: ["amount of cash", "whether the operation was posted"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: сверка сумм с данными учёта выполняется по документам и в учётной системе."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 56"
+        quote: "В конце рабочего дня кассовый работник и контролирующий работник осуществляют сверку суммы полученных и выданных наличных денег с суммой пересчитанных, отсортированных и упакованных наличных денег в соответствии с внутренними документами банка."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z194"
+        edition_checked: "2026-10-17"
+
+  - id: collection_documents_and_seal_match
+    name: "Препроводительный документ и тождественность пломбы образцу"
+    seen_in_training: false
+    detectable: false
+    severity: medium
+    omission: true
+    visual_criteria: []
+    never_claim: ["contents of the accompanying document", "whether the seal matches the specimen"]
+    grounding_queries: []
+    choice_option: ""
+    verify_prompt: ""
+    why: ""
+    limitation: "Не проверяется по видео: сведения препроводительного документа и совпадение оттиска пломбы с образцом с камеры не читаются."
+    citations:
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 24, ч. 2, подп. 1)"
+        quote: "проверяет указание на препроводительном документе необходимых сведений, предусмотренных пунктом 106 Правил"
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z119"
+        edition_checked: "2026-10-17"
+      - document: "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей в банках второго уровня ... (утв. постановлением Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231)"
+        clause: "п. 94, ч. 3"
+        quote: "Второй экземпляр передается кассовому работнику банка для проверки тождественности пломб при приеме сумок клиента."
+        url: "https://adilet.zan.kz/rus/docs/V1900019680#z513"
+        edition_checked: "2026-10-17"

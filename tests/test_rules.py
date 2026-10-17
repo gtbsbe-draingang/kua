@@ -1,4 +1,6 @@
 import copy
+import csv
+import re
 from pathlib import Path
 
 import pytest
@@ -39,13 +41,57 @@ def test_valid_fixture_loads(tmp_path):
     assert set(load_rules(write(tmp_path, [rule(), other()]))) == {"r1", "other"}
 
 
-def test_loads_v0_non_strict():
-    assert set(load_rules(ROOT / "rules.yaml", strict=False)) == {"other", "cash_unattended"}
+def test_catalogue_loads_strict():
+    rules = load_rules(ROOT / "rules.yaml", strict=True)
+    assert "other" in rules
+    assert "cash_unattended" in rules  # the stub pipeline emits this id
+    for rid, r in rules.items():
+        if r.get("detectable"):
+            assert 2 <= len(r["grounding_queries"]) <= 4, rid
 
 
-def test_v0_strict_fails():
-    with pytest.raises(RuleError):
-        load_rules(ROOT / "rules.yaml")
+# "left" is also the past tense of "leave" ("cash is left unattended"), which describes an
+# action, not a place. It counts as a position only in a spatial phrase ("on the left",
+# "left side", "left of the desk").
+POSITION_WORDS = re.compile(
+    r"\b(right|top|bottom|upper|lower|corner|foreground|background)\b"
+    r"|\b(the|on|to|at|from|in|far|bottom|top|upper|lower)\s+left\b"
+    r"|\bleft[\s-]+(side|hand|of|part|half|edge|window|portion|third)\b",
+    re.I)
+
+
+def _prompt_strings(r):
+    out = list(r.get("grounding_queries") or []) + list(r.get("visual_criteria") or [])
+    out += [r.get("choice_option") or "", r.get("verify_prompt") or ""]
+    return out
+
+
+def test_queries_have_no_screen_positions():
+    for rid, r in load_rules(ROOT / "rules.yaml", strict=True).items():
+        for text in _prompt_strings(r):
+            m = POSITION_WORDS.search(str(text))
+            assert not m, f"{rid}: {m.group(0)!r} in {text!r}"
+
+
+def test_every_seen_rule_has_a_clip():
+    with open(ROOT / "data" / "labels.csv", encoding="utf-8", newline="") as f:
+        used = {row["type_id"] for row in csv.DictReader(f)}
+    for rid, r in load_rules(ROOT / "rules.yaml", strict=True).items():
+        if r.get("seen_in_training"):
+            assert rid in used, rid
+
+
+REPEALED = re.compile(r"(58\s+(от|of)\s+.*2001|394\s+(от|of)\s+.*1999|V14Y0010204)", re.I)
+
+
+def test_no_cited_repealed_acts():
+    for rid, r in load_rules(ROOT / "rules.yaml", strict=True).items():
+        for c in r.get("citations") or []:
+            for field in ("document", "url"):
+                v = str(c.get(field) or "")
+                assert not REPEALED.search(v), f"{rid}: {field} {v!r}"
+                assert "V14Y0010204" not in v, rid
+                assert not re.search(r"№\s*(58|394)\b", v), f"{rid}: {v!r}"
 
 
 def test_strict_rejects_todo_quote(tmp_path):
