@@ -1,6 +1,7 @@
 """Pure decision logic of the review pipeline: no I/O, no models."""
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 from pipeline.types import Event
@@ -11,11 +12,12 @@ def _r(x: float) -> float:
 
 
 def segments(probs: list[float], step_sec: float, cand: float) -> list[tuple[float, float, float]]:
-    """Maximal runs of consecutive probs >= cand as (start, end, max prob); sample i is at i*step_sec."""
+    """Maximal runs of consecutive probs >= cand as (start, end, max prob); sample i is at i*step_sec.
+    NaN never reaches cand."""
     out: list[tuple[float, float, float]] = []
     i, n = 0, len(probs)
     while i < n:
-        if probs[i] < cand:
+        if not probs[i] >= cand:
             i += 1
             continue
         j = i
@@ -106,3 +108,28 @@ def judge_candidates(type_probs: dict[str, float], verify_type: str, k: int = 3)
 
 def accept_judge(rule_id: str | None, candidates: list[str]) -> bool:
     return rule_id is not None and rule_id in candidates
+
+
+def sample_times(duration: float, fps: float, max_frames: int | None = None) -> list[float]:
+    """Frame times VideoJev samples from a clip: k/fps while < duration; above max_frames,
+    max_frames frames spread evenly over the clip instead (VideoJev's sampling_grid)."""
+    if duration <= 0 or fps <= 0:
+        raise ValueError("duration and fps must be positive")
+    times = [k / fps for k in range(math.ceil(duration * fps)) if k / fps < duration]
+    if max_frames is not None and len(times) > max_frames:
+        eff = max_frames / duration
+        times = [k / eff for k in range(max_frames)]
+    return times
+
+
+def pair_timeline(frame_times: list[float], duration: float) -> tuple[list[float], list[tuple[float, float]]]:
+    """VideoJev scores one value per pair of sampled frames. Score i stands for the midpoint of frames
+    2i and 2i+1 (an odd last frame pairs with itself); its cell runs halfway to the neighbouring pairs,
+    and the outer cells reach 0 and the duration (VideoJev's pair_timeline)."""
+    t = [float(x) for x in frame_times]
+    if not t:
+        raise ValueError("no frame times")
+    last = len(t) - 1
+    centres = [(t[i] + t[min(i + 1, last)]) / 2 for i in range(0, len(t), 2)]
+    edges = [0.0] + [(t[i] + t[i + 1]) / 2 for i in range(1, last, 2)] + [float(duration)]
+    return centres, [(edges[k], edges[k + 1]) for k in range(len(centres))]

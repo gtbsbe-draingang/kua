@@ -14,4 +14,5 @@ def get_analyze() -> Callable[[str, float, Callable[[str], None]], PipelineResul
         return stub.analyze
     from pipeline import real
 
+    real.warmup()  # load the rules, thresholds and VideoJev at server start, not on the first job
     return real.analyze
