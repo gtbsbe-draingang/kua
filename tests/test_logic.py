@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from pipeline.logic import (accept_judge, judge_candidates, keep_decision, merge_events,
@@ -159,3 +161,108 @@ def test_merge_events_indexed_links_each_output_to_its_source():
     assert [(e.rule_id, e.timecode, i) for e, i in out] == [("x", 11.0, 1), ("r", 12.0, 2), ("r", 20.0, 3)]
     assert (out[1][0].t_start, out[1][0].t_end) == (9.0, 13.0)
     assert [e for e, _ in out] == merge_events(evs, 3.0)
+
+
+# ---- the "cells" candidate generator ---------------------------------------------------------------
+
+def test_keep_strong_none_never_fires():
+    th = {**TH, "strong": None}
+    assert keep_decision(1.0, 0.1, True, th) == (False, "rejected")
+    assert keep_decision(1.0, None, False, th) == (True, "fallback_no_vlm")  # the fallback rule still applies
+    assert keep_decision(0.0, None, False, th) == (False, "rejected")
+    assert keep_decision(0.0, 0.5, True, th) == (True, "verified")
+
+
+def test_logit_clips_0_1_and_treats_nan_as_0():
+    from pipeline.logic import LOGIT_EPS, logit
+    lo = math.log(LOGIT_EPS / (1 - LOGIT_EPS))
+    assert logit(0.0) == pytest.approx(lo) and logit(-3.0) == pytest.approx(lo)
+    assert logit(1.0) == pytest.approx(-lo) and logit(float("inf")) == pytest.approx(-lo)
+    assert logit(float("nan")) == logit(0.0) and logit(None) == logit(0.0) and logit("x") == logit(0.0)
+    assert logit(0.5) == 0.0 and logit(0.9) == pytest.approx(math.log(9))
+
+
+def test_logit_contrast_subtracts_the_curve_median():
+    from pipeline.logic import logit, logit_contrast
+    z = logit_contrast([0.9, 0.9, 0.95, 0.9, 0.6])
+    assert z == pytest.approx([0.0, 0.0, logit(0.95) - logit(0.9), 0.0, logit(0.6) - logit(0.9)])
+    assert logit_contrast([0.2, 0.4]) == pytest.approx([(logit(0.2) - logit(0.4)) / 2, (logit(0.4) - logit(0.2)) / 2])
+    assert logit_contrast([]) == []
+
+
+def test_rank_curve_is_the_max_contrast_over_queries_and_its_first_query():
+    from pipeline.logic import logit, rank_curve
+    flat_high = [0.98] * 5  # always on: contrast 0 everywhere
+    bump = [0.5, 0.5, 0.9, 0.5, 0.5]
+    x, arg = rank_curve([flat_high, bump])
+    assert x == pytest.approx([0.0, 0.0, logit(0.9), 0.0, 0.0])
+    assert arg == [0, 0, 1, 0, 0]  # ties go to the first query
+    assert rank_curve([]) == ([], [])
+    with pytest.raises(ValueError):
+        rank_curve([[0.5, 0.5], [0.5]])
+
+
+def _times(duration, step=1.0):
+    return [i * step + 0.25 for i in range(int(duration / step))]
+
+
+def test_cells_cover_a_short_clip_in_time_order():
+    from pipeline.logic import cells, top_cells
+    x = [0.0] * 20
+    x[13] = 2.0
+    all_cells = cells(_times(20), x, 20.0, 4.0)
+    assert [(c.index, c.t_start, c.t_end, c.centre) for c in all_cells] == [
+        (0, 0.0, 4.0, 2.0), (1, 4.0, 8.0, 6.0), (2, 8.0, 12.0, 10.0), (3, 12.0, 16.0, 14.0), (4, 16.0, 20.0, 18.0)]
+    assert [c.rank for c in all_cells] == [1, 2, 3, 0, 4]  # the bump's cell first, then ties by time
+    assert all_cells[3].best == 13 and all_cells[3].score == 2.0
+    assert all_cells[0].members == (0, 1, 2, 3)
+    assert top_cells(all_cells, 6) == all_cells  # every cell, in time order
+
+
+def test_cells_rank_a_long_clip_and_keep_the_top_k_in_time_order():
+    from pipeline.logic import cells, top_cells
+    x = [0.0] * 40
+    x[33], x[9], x[20] = 3.0, 2.0, 1.0  # cells 8, 2, 5
+    top = top_cells(cells(_times(40), x, 40.0, 4.0), 2)
+    assert [(c.index, c.rank, c.centre, c.best) for c in top] == [(2, 1, 10.0, 9), (8, 0, 34.0, 33)]
+    assert [c.index for c in top_cells(cells(_times(40), x, 40.0, 4.0), 3)] == [2, 5, 8]
+
+
+def test_cells_ties_go_to_the_earlier_cell_and_index():
+    from pipeline.logic import cells, top_cells
+    x = [1.0] * 40
+    top = top_cells(cells(_times(40), x, 40.0, 4.0), 2)
+    assert [c.index for c in top] == [0, 1] and top[0].best == 0  # first index of the cell on a tie
+
+
+def test_cells_last_cell_is_partial():
+    from pipeline.logic import cells
+    cs = cells(_times(22), [0.0] * 22, 22.0, 4.0)
+    assert len(cs) == 6 and (cs[-1].t_start, cs[-1].t_end, cs[-1].centre) == (20.0, 22.0, 21.0)
+    assert cs[-1].members == (20, 21)
+    assert len(cells([0.25], [0.0], 4.0, 4.0)) == 1  # an exact multiple adds no empty cell
+
+
+def test_cells_partition_the_indices_and_rank_empty_cells_last():
+    from pipeline.logic import cells, top_cells
+    times = [3.0, 4.0, 4.5, 30.0]  # 4.0 sits on a boundary: it belongs to the later cell only
+    cs = cells(times, [0.5, 0.1, 0.2, 9.0], 12.0, 4.0)  # 30.0 lies past the clip: the last cell takes it
+    assert [c.members for c in cs] == [(0,), (1, 2), (3,)]
+    assert [c.best for c in cs] == [0, 2, 3]
+    sparse = cells([1.0, 9.0], [0.5, 0.2], 12.0, 4.0)  # cell 1 has no grounding index
+    assert sparse[1].best is None and sparse[1].score == -math.inf and sparse[1].rank == 2
+    assert [c.index for c in top_cells(sparse, 2)] == [0, 2]
+    with pytest.raises(ValueError):
+        cells([0.25], [0.0, 1.0], 4.0, 4.0)
+    with pytest.raises(ValueError):
+        cells([0.25], [0.0], 0.0, 4.0)
+
+
+def test_even_cells_spread_top_k_cells_over_the_clip():
+    from pipeline.logic import even_cells
+    assert [c.index for c in even_cells(20.0, 4.0, 6)] == [0, 1, 2, 3, 4]
+    long = even_cells(142.5, 4.0, 6)  # 36 cells
+    assert [c.index for c in long] == [3, 9, 15, 21, 27, 33]
+    assert all(c.rank is None and c.best is None and c.members == () for c in long)
+    assert (long[0].t_start, long[0].t_end, long[0].centre) == (12.0, 16.0, 14.0)
+    assert [(c.t_start, c.t_end) for c in even_cells(22.0, 4.0, 2)] == [(4.0, 8.0), (16.0, 20.0)]

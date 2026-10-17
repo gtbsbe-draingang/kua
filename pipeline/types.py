@@ -17,7 +17,8 @@ class Event:
     t_start: float
     t_end: float
     timecode: float  # == evidence[0].t when evidence is present
-    ground_score: float  # max sigmoid over the rule's grounding queries
+    ground_score: float  # raw grounding probability: cells, the max over every query in the cell; segments,
+    # the max over the rule's queries in the segment
     type_probs: dict[str, float]  # choice softmax over rule ids + "none"
     verify_score: float | None  # P(YES); None = not run
     kept: bool
@@ -27,6 +28,7 @@ class Event:
     judge_rule_id: str | None = None
     justification: str = ""
     type_source: str = "fallback"  # judge | fallback
+    rank: int | None = None  # 0-based rank of the candidate by grounding within the clip; None = not ranked
 
 
 @dataclass
@@ -35,6 +37,9 @@ class PipelineResult:
     events: list[Event]  # all candidates, including rejected ones
     timings: dict[str, float]
     versions: dict[str, str]
+    generator: str | None = None  # how candidates were made: cells | segments (None: no generator, e.g. stub)
+    cell_sec: float | None = None  # the cell length of the cells generator
+    generator_fallback: bool = False  # grounding failed, so the cells were spread evenly instead of ranked
 
 
 def to_debug(result: PipelineResult) -> dict:

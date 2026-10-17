@@ -21,8 +21,10 @@ from pipeline.videojev import Curves
 from rules import load_rules
 
 ROOT = Path(__file__).resolve().parent.parent
-TH = {"cand": 0.25, "verify": 0.5, "strong": 0.8, "fallback": 0.5, "top_k": 6, "merge_sec": 3,
-      "anchor": "peak", "anchor_offset_sec": 0}
+# The legacy generator ("segments"), with the thresholds it ran on before the cells generator.
+TH = {"generator": "segments", "cand": 0.25, "verify": 0.5, "strong": 0.8, "fallback": 0.5, "top_k": 6,
+      "merge_sec": 3, "anchor": "peak", "anchor_offset_sec": 0}
+TH_CELLS = {**TH, "generator": "cells", "cell_sec": 4.0, "rank": "logit", "strong": None, "anchor": "center"}
 REAL_JUDGE, REAL_GROUND, REAL_CHOOSE = real.judge, real.ground, real.choose
 LOW = 0.05
 
@@ -519,3 +521,131 @@ def test_evidence_falls_back_to_single_frames(rig, clip, monkeypatch):
     monkeypatch.setattr(frames, "jpeg_at", picky)
     ev, = kept(real.analyze(clip, time.time() + 240, lambda s: None))
     assert len(ev.evidence) == 1 and ev.timecode == ev.evidence[0].t == pytest.approx(0.75)  # t_start
+
+
+# ---- the cells generator ----------------------------------------------------------------------------
+# The 6 s test clip at 2 fps has 6 grounding scores at 0.25, 1.25, ..., 5.25 s: cells [0, 4] (scores 0-3) and
+# [4, 6] (scores 4-5).
+
+@pytest.fixture
+def cells_rig(monkeypatch, tmp_path, rules):
+    return setup_rig(monkeypatch, tmp_path, rules, TH_CELLS)
+
+
+def test_cells_end_to_end(cells_rig, clip):
+    from pipeline.types import to_debug
+    two_candidates(cells_rig)
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert (res.generator, res.cell_sec, res.generator_fallback) == ("cells", 4.0, False)
+    a, b = res.events
+    assert (a.t_start, a.t_end, a.rule_id, a.rank, a.kept, a.reason) == (
+        0.0, 4.0, "cash_unattended", 0, True, "verified")
+    assert a.ground_score == pytest.approx(0.7)  # the raw max in the cell
+    assert a.timecode == a.evidence[0].t == pytest.approx(2.0, abs=0.04)  # the cell centre
+    assert (b.t_start, b.t_end, b.rule_id, b.rank, b.kept, b.timecode) == (
+        4.0, 6.0, "personal_items_at_workplace", 1, False, pytest.approx(5.0))
+    assert b.ground_score == pytest.approx(0.4)
+    w = {c["ids"][0]: c for c in cells_rig.verify_calls}  # windows [t_start - 2, t_end + 2] within the clip
+    assert w["cash_unattended"]["duration"] == pytest.approx(6.0, abs=0.15)
+    assert w["personal_items_at_workplace"]["duration"] == pytest.approx(4.0, abs=0.15)
+    dbg = json.loads(json.dumps(to_debug(res)))
+    assert (dbg["generator"], dbg["cell_sec"], dbg["generator_fallback"]) == ("cells", 4.0, False)
+    assert [e["rank"] for e in dbg["events"]] == [0, 1]
+    assert json.loads(res.versions["thresholds"]) == TH_CELLS
+
+
+def test_cells_rule_is_the_rank_argmax_query_and_ground_is_the_cell_raw_max(monkeypatch, tmp_path, rules, clip):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "top_k": 1})
+    # cash_unattended is high everywhere after 0 s (contrast about 0); personal items stand out at 2.25 s
+    rig.curves = {"cash_unattended": [LOW, 0.95, 0.95, 0.95, 0.95, 0.95],
+                  "personal_items_at_workplace": [LOW, LOW, 0.5, LOW, LOW, LOW]}
+    ev, = real.analyze(clip, time.time() + 240, lambda s: None).events
+    assert (ev.t_start, ev.t_end, ev.rule_id, ev.rank) == (0.0, 4.0, "personal_items_at_workplace", 0)
+    assert ev.ground_score == pytest.approx(0.95)
+    assert [c["ids"][0] for c in rig.verify_calls] == ["personal_items_at_workplace"]
+
+
+def test_cells_top_k_keeps_the_best_ranked_cell(monkeypatch, tmp_path, rules, clip):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_CELLS, "top_k": 1, "anchor_offset_sec": -0.5})
+    rig.curves = {"cash_unattended": [LOW, LOW, LOW, LOW, LOW, 0.8]}
+    ev, = real.analyze(clip, time.time() + 240, lambda s: None).events
+    assert (ev.t_start, ev.t_end, ev.rule_id, ev.rank, ev.timecode) == (
+        4.0, 6.0, "cash_unattended", 0, pytest.approx(4.5))
+
+
+def _ground_fails(exc):
+    def ground(path, queries):
+        raise exc
+    return ground
+
+
+def test_cells_fall_back_to_an_even_grid_when_grounding_raises(cells_rig, clip, monkeypatch, caplog):
+    monkeypatch.setattr(real, "ground", _ground_fails(RuntimeError("CUDA error")))
+    cells_rig.verdicts = {"other": (0.1, "none", "Ничего не видно.")}
+    with caplog.at_level(logging.WARNING, logger="pipeline.real"):
+        res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert (res.generator, res.generator_fallback) == ("cells", True)
+    assert [(e.t_start, e.t_end, e.timecode, e.rule_id, e.ground_score, e.rank, e.kept) for e in res.events] == [
+        (0.0, 4.0, 2.0, "other", 0.0, None, False), (4.0, 6.0, 5.0, "other", 0.0, None, False)]
+    assert [c["ids"][0] for c in cells_rig.verify_calls] == ["other", "other"]
+    assert any("evenly spaced" in r.getMessage() for r in caplog.records)
+    cells_rig.verdicts = {"other": (0.9, "none", "Кассир отходит.")}  # the keep rule rests on InternVideo3 alone
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert res.verdict == "violation" and {e.reason for e in res.events if e.kept} == {"verified"}
+
+
+def test_cells_fallback_without_the_check_keeps_nothing(cells_rig, clip, monkeypatch):
+    monkeypatch.setattr(real, "ground", _ground_fails(RuntimeError("CUDA error")))
+    res = real.analyze(clip, time.time() - 1, lambda s: None)  # no time left for InternVideo3
+    assert res.generator_fallback and cells_rig.verify_calls == []
+    assert res.verdict == "no_violation" and [e.reason for e in res.events] == ["rejected", "rejected"]
+
+
+def test_cells_fall_back_when_the_model_stays_busy(cells_rig, clip, monkeypatch):
+    monkeypatch.setattr(real, "ground", _ground_fails(videojev.ModelBusy("busy")))
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert res.generator_fallback and [e.rule_id for e in res.events] == ["other", "other"]
+
+
+@pytest.mark.parametrize("answer", [{}, "nan"])
+def test_cells_fall_back_without_usable_scores(cells_rig, clip, monkeypatch, answer):
+    def ground(path, queries):
+        return {} if answer == {} else {q: [float("nan")] * 6 for q in queries}
+    monkeypatch.setattr(real, "ground", ground)
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert res.generator_fallback and [(e.t_start, e.rank) for e in res.events] == [(0.0, None), (4.0, None)]
+
+
+def test_segments_results_record_rank_and_generator(rig, clip):
+    two_candidates(rig)
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert (res.generator, res.cell_sec, res.generator_fallback) == ("segments", None, False)
+    assert [e.rank for e in res.events] == [0, 1]  # by grounding score
+
+
+def test_thresholds_strong_null_cells_keys_and_rejections(tmp_path):
+    p = tmp_path / "th.json"
+    p.write_text(json.dumps(TH_CELLS))
+    assert real._load_thresholds(p)["strong"] is None
+    p.write_text(json.dumps(TH))  # a segments file needs no cell keys
+    assert real._load_thresholds(p)["generator"] == "segments"
+    bad = [({"strong": "high"}, "strong"), ({"strong": True}, "strong"), ({"strong": float("nan")}, "strong"),
+           ({"generator": "peaks"}, "generator"), ({"rank": "z"}, "rank"), ({"cell_sec": 0}, "cell_sec"),
+           ({"cell_sec": None}, "cell_sec"), ({"anchor": "middle"}, "anchor")]
+    for change, match in bad:
+        p.write_text(json.dumps({**TH_CELLS, **change}))
+        with pytest.raises(ValueError, match=match):
+            real._load_thresholds(p)
+    for key in ("generator", "cell_sec", "rank"):
+        p.write_text(json.dumps({k: v for k, v in TH_CELLS.items() if k != key}))
+        with pytest.raises(ValueError, match=key):
+            real._load_thresholds(p)
+    p.write_text(json.dumps({**TH, "anchor": "center"}))  # the legacy generator has no centre anchor
+    with pytest.raises(ValueError, match="anchor"):
+        real._load_thresholds(p)
+
+
+def test_committed_thresholds_use_cells_without_strong():
+    assert real._load_thresholds(ROOT / "thresholds.json") == {
+        "generator": "cells", "cell_sec": 4.0, "rank": "logit", "cand": 0.25, "verify": 0.05, "strong": None,
+        "fallback": 0.5, "top_k": 6, "merge_sec": 3, "anchor": "center", "anchor_offset_sec": 0}

@@ -2,13 +2,119 @@
 from __future__ import annotations
 
 import math
+import statistics
+from collections.abc import Sequence
 from dataclasses import replace
+from typing import NamedTuple
 
 from pipeline.types import Event
+
+LOGIT_EPS = 1e-6  # probabilities are clipped to [LOGIT_EPS, 1 - LOGIT_EPS] before the logit
+CELL_EPS = 1e-6  # seconds: a grounding time this close below a cell boundary belongs to the later cell
 
 
 def _r(x: float) -> float:
     return round(x, 6)
+
+
+# ---- the "cells" candidate generator --------------------------------------------------------------
+# The clip is cut into fixed cells of cell_sec seconds; each cell is scored by how far the grounding scores
+# inside it stand above each query's own clip baseline (logit p - median logit p, maxed over the queries);
+# the top_k cells by score are the candidates. A clip of at most top_k cells is covered completely.
+
+def logit(p) -> float:
+    """log(p / (1 - p)) with p clipped to [LOGIT_EPS, 1 - LOGIT_EPS]. NaN, None and other non-numbers count
+    as 0, like a missing grounding score."""
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        p = 0.0
+    if math.isnan(p):
+        p = 0.0
+    p = min(max(p, LOGIT_EPS), 1 - LOGIT_EPS)
+    return math.log(p / (1 - p))
+
+
+def logit_contrast(p: Sequence[float]) -> list[float]:
+    """logit p[i] minus the median over i of logit p: how far each score stands above the curve's own
+    typical level (a query that is always on scores about 0 everywhere)."""
+    z = [logit(v) for v in p]
+    if not z:
+        return []
+    m = statistics.median(z)
+    return [v - m for v in z]
+
+
+def rank_curve(curves: Sequence[Sequence[float]]) -> tuple[list[float], list[int]]:
+    """x[i] = max over the curves q of logit_contrast(q)[i], and the index of the first curve reaching it.
+    All curves must have the same length."""
+    if not curves:
+        return [], []
+    n = len(curves[0])
+    if any(len(c) != n for c in curves):
+        raise ValueError("rank_curve needs curves of equal length")
+    cs = [logit_contrast(c) for c in curves]
+    x, arg = [], []
+    for i in range(n):
+        best = 0
+        for q in range(1, len(cs)):
+            if cs[q][i] > cs[best][i]:
+                best = q
+        x.append(cs[best][i])
+        arg.append(best)
+    return x, arg
+
+
+class Cell(NamedTuple):
+    index: int  # j: the cell is [j * cell_sec, min((j + 1) * cell_sec, duration)]
+    t_start: float
+    t_end: float
+    members: tuple[int, ...]  # grounding indices whose time falls in the cell
+    best: int | None  # the member with the highest rank score (the earliest on a tie); None without members
+    score: float  # the rank score at best; -inf without members
+    rank: int | None  # 0-based rank by score within the clip (ties: the earlier cell); None = not ranked
+
+    @property
+    def centre(self) -> float:
+        return (self.t_start + self.t_end) / 2
+
+
+def _cell_bounds(duration: float, cell_sec: float) -> list[tuple[float, float]]:
+    if not duration > 0 or not cell_sec > 0:
+        raise ValueError("duration and cell_sec must be positive")
+    n = max(1, math.ceil(duration / cell_sec - 1e-9))
+    return [(j * cell_sec, min((j + 1) * cell_sec, duration)) for j in range(n)]
+
+
+def cells(times: Sequence[float], x: Sequence[float], duration: float, cell_sec: float) -> list[Cell]:
+    """Every cell of the clip in time order, scored by the max of x over its grounding indices and ranked by
+    that score (ties: the earlier cell). Each index belongs to exactly one cell: a time on a boundary goes to
+    the later cell, a time outside the clip to the first or last cell."""
+    if len(times) != len(x):
+        raise ValueError("times and x must have the same length")
+    bounds = _cell_bounds(duration, cell_sec)
+    members: list[list[int]] = [[] for _ in bounds]
+    for i, t in enumerate(times):
+        members[min(max(math.floor((float(t) + CELL_EPS) / cell_sec), 0), len(bounds) - 1)].append(i)
+    best = [max(m, key=lambda i: (x[i], -i)) if m else None for m in members]
+    score = [float(x[b]) if b is not None else -math.inf for b in best]
+    order = sorted(range(len(bounds)), key=lambda j: (-score[j], j))
+    rank = {j: r for r, j in enumerate(order)}
+    return [Cell(j, a, b, tuple(members[j]), best[j], score[j], rank[j]) for j, (a, b) in enumerate(bounds)]
+
+
+def top_cells(all_cells: Sequence[Cell], top_k: int) -> list[Cell]:
+    """The top_k cells by rank, in time order."""
+    return [c for c in all_cells if c.rank is not None and c.rank < top_k]
+
+
+def even_cells(duration: float, cell_sec: float, top_k: int) -> list[Cell]:
+    """The fallback when there are no grounding scores: top_k cells spread evenly over the clip (every cell
+    when there are at most top_k), unscored and unranked."""
+    bounds = _cell_bounds(duration, cell_sec)
+    n = len(bounds)
+    js = range(n) if n <= top_k else [math.floor((i + 0.5) * n / top_k) for i in range(top_k)]
+    return [Cell(j, *bounds[j], (), None, -math.inf, None) for j in js]
 
 
 def segments(probs: list[float], step_sec: float, cand: float) -> list[tuple[float, float, float]]:
@@ -46,9 +152,12 @@ def top_candidates(per_rule: dict[str, list[tuple]], top_k: int) -> list[tuple[s
 
 
 def keep_decision(ground: float, verify: float | None, vlm_ok: bool, th: dict) -> tuple[bool, str]:
+    """Keep a candidate when InternVideo3 says yes (p_yes >= verify); when grounding alone is at least
+    `strong` (None turns this rule off: it never fires); or, only when InternVideo3 gave no answer, when
+    grounding is at least `fallback`."""
     if vlm_ok and verify is not None and verify >= th["verify"]:
         return True, "verified"
-    if ground >= th["strong"]:
+    if th["strong"] is not None and ground >= th["strong"]:
         return True, "strong_ground"
     if not vlm_ok and ground >= th["fallback"]:
         return True, "fallback_no_vlm"

@@ -50,6 +50,8 @@ SVC = Path(__file__).resolve().parent.parent
 if str(SVC) not in sys.path:
     sys.path.insert(0, str(SVC))
 
+from pipeline import logic  # noqa: E402  (the pipeline's cells generator and logit: one implementation)
+
 TOL = 2.0  # the plan's timecode tolerance (s)
 LONG_SEC = 24.0  # 6 windows of 4 s: a longer clip cannot be covered by evenly spaced windows
 PAD = 2.0  # real.WINDOW_PAD_SEC
@@ -100,8 +102,9 @@ def clip_key(name: str):
 # ---- pure helpers (unit-tested) ------------------------------------------------------------------
 
 def logit(p: np.ndarray) -> np.ndarray:
-    p = np.clip(np.asarray(p, dtype=float), 1e-6, 1 - 1e-6)
-    return np.log(p / (1 - p))
+    """pipeline.logic.logit elementwise."""
+    p = np.asarray(p, dtype=float)
+    return np.array([logic.logit(v) for v in p.ravel()], dtype=float).reshape(p.shape)
 
 
 def contrast(p: np.ndarray, kind: str) -> np.ndarray:
@@ -113,8 +116,7 @@ def contrast(p: np.ndarray, kind: str) -> np.ndarray:
     if kind == "median":
         return p - np.median(p)
     if kind == "logit":
-        z = logit(p)
-        return z - np.median(z)
+        return np.array(logic.logit_contrast(p.tolist()), dtype=float)
     if kind == "z":
         sd = float(np.std(p))
         return (p - float(np.mean(p))) / sd if sd > 1e-9 else np.zeros_like(p)
@@ -268,6 +270,9 @@ def cell_scores(clip: Clip, kind: str, keep: set[str] | None = None) -> tuple[np
     """Per grounding index: the max over the (kept) queries of their (contrast) curves, and the rule of the
     query that gives it."""
     qs = [q for q in clip.queries if keep is None or q in keep] or list(clip.queries)
+    if kind == "logit":  # the pipeline's own rank curve
+        x, best = logic.rank_curve([clip.q[q].tolist() for q in qs])
+        return np.array(x, dtype=float), [clip.query_rules[qs[i]][0] for i in best]
     m = np.stack([contrast(clip.q[q], kind) for q in qs])
     best = m.argmax(axis=0)
     return m.max(axis=0), [clip.query_rules[qs[i]][0] for i in best]
@@ -278,19 +283,14 @@ def gen_cells(clip: Clip, cell: float, top_k: int, kind: str = "raw", anchor: st
     """The top_k `cell`-second cells by the max score inside them (a clip of at most top_k cells is covered
     completely); timecode at the cell centre, or at the time of the cell's highest score."""
     x, rule_at = cell_scores(clip, kind, keep)
-    n_cells = max(1, int(math.ceil(clip.duration / cell - 1e-9)))
-    pool = []
-    for j in range(n_cells):
-        a, b = j * cell, min((j + 1) * cell, clip.duration)
-        idx = [i for i in range(len(clip.times)) if a - EPS <= clip.times[i] < b + EPS]
-        if not idx:
-            continue
-        ip = max(idx, key=lambda i: (x[i], -i))
-        tc = (a + b) / 2 if anchor == "center" else float(clip.times[ip])
-        pool.append({"rule": rule_at[ip], "t_start": a, "t_end": b, "timecode": tc, "score": float(x[ip]),
-                     "raw": float(max(clip.q[q][ip] for q in clip.queries))})
-    pool.sort(key=lambda c: (-c["score"], c["t_start"]))
-    return sorted(pool[:top_k], key=lambda c: c["t_start"])
+    out = []
+    for c in logic.top_cells(logic.cells(clip.times, x, clip.duration, cell), top_k):
+        if c.best is None:
+            continue  # no grounding index in the cell (the pipeline keeps it as an unscored candidate)
+        tc = c.centre if anchor == "center" else float(clip.times[c.best])
+        out.append({"rule": rule_at[c.best], "t_start": c.t_start, "t_end": c.t_end, "timecode": tc,
+                    "score": float(x[c.best]), "raw": float(max(clip.q[q][c.best] for q in clip.queries))})
+    return out
 
 
 # ---- metrics ------------------------------------------------------------------------------------

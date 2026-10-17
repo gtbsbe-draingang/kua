@@ -202,8 +202,8 @@ def operating_points(rows: list[dict], labels: dict, vs: list[float], ms: list[i
 
 
 def _logit(p: float) -> float:
-    p = min(max(p, 1e-6), 1 - 1e-6)
-    return math.log(p / (1 - p))
+    from pipeline.logic import logit
+    return logit(p)
 
 
 def cmd_report(a) -> int:

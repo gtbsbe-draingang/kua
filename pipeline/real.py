@@ -5,6 +5,13 @@ each moment, an optional judge picks the rule and words the justification, and e
 Recall comes first: a failed or late model call can only fall back to the grounding score; it never drops
 a moment that grounding alone would keep.
 
+Candidates come from one of two generators, chosen by `generator` in thresholds.json:
+- "cells" (the default since Task 7C-2): the clip is cut into cell_sec cells, ranked by how far the grounding
+  scores inside each stand above their query's clip median (logic.cells); the top_k cells are checked, each
+  with the cell centre as its timecode. If grounding fails or gives no usable scores, top_k cells spread
+  evenly over the clip are checked instead, and InternVideo3 alone decides.
+- "segments" (the original design): runs of a rule's grounding score >= cand, merged across rules.
+
 `ground`, `choose`, `verify` and `judge` are the module-level wrappers the tests mock.
 """
 from __future__ import annotations
@@ -28,8 +35,9 @@ from pathlib import Path
 import yaml
 
 from pipeline import clients, frames, videojev
-from pipeline.logic import (accept_judge, judge_candidates, keep_decision, merge_events_indexed,
-                            pair_timeline, pick_timecode, sample_times, segments, top_candidates)
+from pipeline.logic import (accept_judge, cells, even_cells, judge_candidates, keep_decision, merge_events_indexed,
+                            pair_timeline, pick_timecode, rank_curve, sample_times, segments, top_candidates,
+                            top_cells)
 from pipeline.types import Event, Frame, PipelineResult
 from rules import load_rules
 
@@ -51,7 +59,13 @@ WINDOWS_MIN_LEFT_SEC = min(VERIFY_MIN_SEC + VERIFY_RESERVE_SEC, CHOOSE_MIN_LEFT_
 # The upright copy may take up to NORMALIZE_MAX_SEC, but never past GROUND_START_RESERVE_SEC before the
 # deadline; it always gets NORMALIZE_MIN_SEC, and on failure the original file is used.
 NORMALIZE_MAX_SEC, NORMALIZE_MIN_SEC = 120.0, 5.0
-TH_KEYS = ("cand", "verify", "strong", "fallback", "top_k", "merge_sec", "anchor", "anchor_offset_sec")
+TH_KEYS = ("generator", "cand", "verify", "strong", "fallback", "top_k", "merge_sec", "anchor",
+           "anchor_offset_sec")
+CELLS_KEYS = ("cell_sec", "rank")  # required by the cells generator
+GENERATORS = ("cells", "segments")
+RANKS = ("logit",)
+ANCHORS = ("peak", "onset", "center")  # cells always use the centre; segments take peak or onset
+FALLBACK_RULE = "other"  # the rule of an unscored cell: the generic catch-all
 
 
 class DeadlineExceeded(RuntimeError):
@@ -98,6 +112,7 @@ class _Config:
     rules: dict[str, dict]
     detectable: list[str]  # catalogue order
     queries: list[str]  # every detectable rule's grounding queries, without repeats
+    query_rules: list[str]  # the rule of each query: the first detectable rule that lists it
     options: list[str]  # choice options: one per detectable rule, then NONE_OPTION
     option_ids: list[str]  # the rule id of each option; "none" for NONE_OPTION
     th: dict
@@ -117,15 +132,27 @@ def _load_thresholds(path: Path) -> dict:
     if not isinstance(th, dict):
         raise ValueError(f"{path}: thresholds must be a JSON object")
     missing = [k for k in TH_KEYS if k not in th]
+    if th.get("generator") == "cells":
+        missing += [k for k in CELLS_KEYS if k not in th]
     if missing:
         raise ValueError(f"{path}: missing {', '.join(missing)}")
-    for k in ("cand", "verify", "strong", "fallback", "merge_sec", "anchor_offset_sec"):
+    if th["generator"] not in GENERATORS:
+        raise ValueError(f"{path}: generator must be one of {', '.join(GENERATORS)}, not {th['generator']!r}")
+    for k in ("cand", "verify", "fallback", "merge_sec", "anchor_offset_sec"):
         if not _number(th[k]):
             raise ValueError(f"{path}: {k} must be a number")
+    if th["strong"] is not None and not _number(th["strong"]):
+        raise ValueError(f"{path}: strong must be a number, or null to turn it off")
+    if "cell_sec" in th and not (_number(th["cell_sec"]) and th["cell_sec"] > 0):
+        raise ValueError(f"{path}: cell_sec must be a positive number")
+    if "rank" in th and th["rank"] not in RANKS:
+        raise ValueError(f"{path}: rank must be one of {', '.join(RANKS)}, not {th['rank']!r}")
     if isinstance(th["top_k"], bool) or not isinstance(th["top_k"], int) or th["top_k"] < 1:
         raise ValueError(f"{path}: top_k must be a positive integer")
-    if th["anchor"] not in ("peak", "onset"):
-        raise ValueError(f"{path}: anchor must be 'peak' or 'onset', not {th['anchor']!r}")
+    if th["anchor"] not in ANCHORS:
+        raise ValueError(f"{path}: anchor must be one of {', '.join(ANCHORS)}, not {th['anchor']!r}")
+    if th["anchor"] == "center" and th["generator"] != "cells":
+        raise ValueError(f"{path}: anchor 'center' needs the cells generator; segments take 'peak' or 'onset'")
     return th
 
 
@@ -148,10 +175,15 @@ def _load_config(rules_path: Path, th_path: Path) -> _Config:
     dup = sorted({o for o in options if options.count(o) > 1})
     if dup:
         raise ValueError(f"each detectable rule needs its own choice_option, other than {NONE_OPTION!r}: {dup}")
-    queries = list(dict.fromkeys(str(q) for rid in detectable for q in rules[rid]["grounding_queries"]))
+    query_rule: dict[str, str] = {}
+    for rid in detectable:
+        for q in rules[rid]["grounding_queries"]:
+            query_rule.setdefault(str(q), rid)
+    queries = list(query_rule)
     th = _load_thresholds(th_path)
     digest = hashlib.sha256(raw).hexdigest()[:12]
-    return _Config(rules, detectable, queries, options, detectable + ["none"], th, f"v{version} sha256:{digest}")
+    return _Config(rules, detectable, queries, [query_rule[q] for q in queries], options, detectable + ["none"],
+                   th, f"v{version} sha256:{digest}")
 
 
 def _config() -> _Config:
@@ -230,6 +262,7 @@ class _Cand:
     p_yes: float | None = None
     vtype: str = ""
     observation: str = ""
+    rank: int | None = None
 
 
 def _left(deadline: float) -> float:
@@ -251,6 +284,47 @@ def _candidate(rid: str, s: float, e: float, score: float, curve: list[float], t
     else:
         tc = tl.times[tl.index(pick_timecode(curve, tl.step, s, e, "peak", 0.0))]
     return _Cand(rid, float(score), t_start, t_end, _clamp(tc + float(th["anchor_offset_sec"]), duration))
+
+
+def _finite(p) -> bool:
+    try:
+        return math.isfinite(float(p))
+    except (TypeError, ValueError):
+        return False
+
+
+def _fallback_rule(cfg: _Config) -> str:
+    return FALLBACK_RULE if FALLBACK_RULE in cfg.detectable else cfg.detectable[0]
+
+
+def _cell_candidates(curves, cfg: _Config, duration: float, th: dict) -> tuple[list[_Cand], bool]:
+    """The cells generator (logic.cells): the top_k cells by rank score, in time order, each timed at its
+    centre (plus anchor_offset_sec) with the rule of the query that ranks it and, as ground_score, the highest
+    raw probability of any query in the cell. Without usable grounding scores (curves None, empty or never
+    finite), top_k cells spread evenly over the clip, with rule FALLBACK_RULE and ground_score 0. Returns the
+    candidates and whether the fallback was used."""
+    cell_sec, top_k, off = float(th["cell_sec"]), int(th["top_k"]), float(th["anchor_offset_sec"])
+    qidx, raw = [], []
+    for qi, q in enumerate(cfg.queries):
+        c = list((curves or {}).get(q) or [])
+        if any(_finite(v) for v in c):
+            qidx.append(qi)
+            raw.append(c)
+    n = max((len(c) for c in raw), default=0)
+    if not n:
+        if curves is not None:
+            log.warning("grounding returned no usable scores; the candidates are evenly spaced cells")
+        return [_Cand(_fallback_rule(cfg), 0.0, c.t_start, c.t_end, _clamp(c.centre + off, duration))
+                for c in even_cells(duration, cell_sec, top_k)], True
+    cs = [[_clean(c[i]) if i < len(c) else 0.0 for i in range(n)] for c in raw]
+    x, arg = rank_curve(cs)
+    tl = _timeline(curves, n, duration)
+    out = []
+    for c in top_cells(cells(tl.times, x, duration, cell_sec), top_k):
+        rid = cfg.query_rules[qidx[arg[c.best]]] if c.best is not None else _fallback_rule(cfg)
+        ground = max((curve[i] for curve in cs for i in c.members), default=0.0)
+        out.append(_Cand(rid, float(ground), c.t_start, c.t_end, _clamp(c.centre + off, duration), rank=c.rank))
+    return out, False
 
 
 def _verify_rules(cfg: _Config, grounded: str) -> list[dict]:
@@ -345,26 +419,41 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     duration = frames.probe(src)[0]  # an unreadable input fails the job here
     lap("decoding", t0)
 
-    # 2. grounding: one VideoJev pass with every query; candidates over all rules
+    # 2. grounding: one VideoJev pass with every query; candidates over all rules. With the cells generator a
+    # failed grounding call (an error, or the model busy for too long) leaves evenly spaced cells to check.
     on_stage("grounding")
     t0 = time.monotonic()
     gt = max(0.0, _left(deadline) - GROUND_START_RESERVE_SEC)
+    use_cells = th["generator"] == "cells"
+    curves = None
     try:
         with model_wait(gt):
             curves = ground(src, cfg.queries)
     except videojev.ModelBusy as e:
-        raise DeadlineExceeded(f"VideoJev stayed busy with other jobs, so grounding could not start at least "
-                               f"{GROUND_START_RESERVE_SEC:.0f} s before the deadline") from e
+        if not use_cells:
+            raise DeadlineExceeded(f"VideoJev stayed busy with other jobs, so grounding could not start at least "
+                                   f"{GROUND_START_RESERVE_SEC:.0f} s before the deadline") from e
+        log.warning("grounding skipped (%s); the candidates are evenly spaced cells", e)
+    except Exception as e:
+        if not use_cells:
+            raise
+        log.warning("grounding failed (%s: %s); the candidates are evenly spaced cells", type(e).__name__, e)
     if _left(deadline) - VERIFY_RESERVE_SEC < VERIFY_MIN_SEC:
         log.warning("grounding finished %.1f s before the deadline: too late for the check step; "
                     "events are kept on grounding scores alone", _left(deadline))
-    rule_curves, n = _rule_curves(curves, cfg)
     cands: list[_Cand] = []
-    if n:
-        tl = _timeline(curves, n, duration)
-        per_rule = {rid: segments(c, tl.step, float(th["cand"])) for rid, c in rule_curves.items()}
-        cands = [_candidate(rid, s, e, sc, rule_curves[rid], tl, duration, th)
-                 for rid, s, e, sc in top_candidates(per_rule, int(th["top_k"]))]
+    grid_fallback = False
+    if use_cells:
+        cands, grid_fallback = _cell_candidates(curves, cfg, duration, th)
+    else:
+        rule_curves, n = _rule_curves(curves, cfg)
+        if n:
+            tl = _timeline(curves, n, duration)
+            per_rule = {rid: segments(c, tl.step, float(th["cand"])) for rid, c in rule_curves.items()}
+            cands = [_candidate(rid, s, e, sc, rule_curves[rid], tl, duration, th)
+                     for rid, s, e, sc in top_candidates(per_rule, int(th["top_k"]))]
+            for r, c in enumerate(cands):  # top_candidates gives them best first
+                c.rank = r
     lap("grounding", t0)
 
     pool = ThreadPoolExecutor(max_workers=POOL_SIZE, thread_name_prefix="review")
@@ -429,7 +518,7 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
         events.append(Event(rule_id=_best_type(c.type_probs, c.rule_id) if kept else c.rule_id,
                             t_start=c.t_start, t_end=c.t_end, timecode=c.timecode, ground_score=c.score,
                             type_probs=c.type_probs, verify_score=c.p_yes, kept=kept, reason=reason,
-                            observation=c.observation))
+                            observation=c.observation, rank=c.rank))
     merged = merge_events_indexed(events, float(th["merge_sec"]))
     events = [ev for ev, _ in merged]
     kept_evs = [(ev, cands[i]) for ev, i in merged if ev.kept]  # each with its best member's candidate
@@ -484,4 +573,5 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
         "thresholds": json.dumps(th, sort_keys=True),
     }
     verdict = "violation" if any(e.kept for e in events) else "no_violation"
-    return PipelineResult(verdict, events, timings, versions)
+    return PipelineResult(verdict, events, timings, versions, generator=th["generator"],
+                          cell_sec=float(th["cell_sec"]) if use_cells else None, generator_fallback=grid_fallback)
