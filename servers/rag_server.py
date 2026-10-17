@@ -18,10 +18,14 @@ How a judge request is answered:
   (matcher.clause_candidates). Retrieved clauses are dropped from the end while the prompt
   is over the /generate limit (matcher.fit_clauses). matcher.judge_prompt runs both and
   builds the prompt; tools/rag_eval.py calls the same function.
-- The LLM (by default InternVideo3's text-only POST /generate at RAG_LLM_URL, or spread over the
-  comma-separated RAG_LLM_URLS, with a
-  timeout of RAG_LLM_TIMEOUT seconds) picks the rule, the clause or none, and P(violation)
-  from matcher.build_prompt. matcher.parse_answer reads its JSON.
+- The LLM picks the rule, the clause or none, and P(violation) from matcher.build_prompt;
+  matcher.parse_answer reads its JSON. RAG_LLM_KIND selects the backend:
+    iv3 (default)  InternVideo3's text-only POST /generate, at RAG_LLM_URL (default port 30000) or spread
+                   over the comma-separated RAG_LLM_URLS;
+    openai         an OpenAI-style POST /v1/chat/completions (the Qwen3.5-9B judge on SGLang, tools/judge_llm.sh,
+                   default http://127.0.0.1:30005/v1/chat/completions) for the model named by RAG_LLM_MODEL
+                   (default qwen3.5-9b), thinking off, any <think> block cut from the reply;
+  both with a timeout of RAG_LLM_TIMEOUT seconds. An unknown kind stops the startup.
 - The model never writes the citation. For the chosen clause the server takes the act's
   document, "п. <num>" and the url from the corpus, and as the quote the clause part the
   retrieval hit on, or else the catalogue quote that brought the clause in (the chosen
@@ -36,6 +40,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 import json  # noqa: E402
 import logging  # noqa: E402
+import re  # noqa: E402
 import time  # noqa: E402
 from collections.abc import Callable  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
@@ -52,6 +57,9 @@ from rag.corpus import Clause, find_quote, load_clauses, passages  # noqa: E402
 from rag.retrieve import TOP_K, Index  # noqa: E402
 
 LLM_URL = "http://127.0.0.1:30000/generate"
+LLM_KIND = "iv3"
+CHAT_URL = "http://127.0.0.1:30005/v1/chat/completions"
+CHAT_MODEL = "qwen3.5-9b"
 LLM_TIMEOUT = 25.0
 MAX_NEW_TOKENS = 384
 CONNECT_TIMEOUT = 2.0
@@ -63,30 +71,74 @@ log = logging.getLogger("rag")
 LLM = Callable[[str, str, float], str]  # (system, prompt, timeout) -> the model's text; raises on failure
 
 
+def post_json(url: str, body: dict, timeout: float) -> dict:
+    """POST body as JSON to a local LLM server and return its JSON object; anything else is an exception."""
+    # trust_env=False: a local service, and a proxy from the environment must not reroute it
+    r = httpx.post(url, json=body, timeout=httpx.Timeout(timeout, connect=min(CONNECT_TIMEOUT, timeout)),
+                   trust_env=False)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    d = r.json()
+    if not isinstance(d, dict):
+        raise ValueError("reply is not a JSON object")
+    return d
+
+
 def http_llm(url: str) -> LLM:
     """An LLM behind POST url, the iv3 server's /generate: {system, prompt, max_new_tokens} -> {"text": ...}."""
     def call(system: str, prompt: str, timeout: float) -> str:
-        # trust_env=False: a local service, and a proxy from the environment must not reroute it
-        r = httpx.post(url, json={"system": system, "prompt": prompt, "max_new_tokens": MAX_NEW_TOKENS},
-                       timeout=httpx.Timeout(timeout, connect=min(CONNECT_TIMEOUT, timeout)), trust_env=False)
-        if r.status_code != 200:
-            raise RuntimeError(f"HTTP {r.status_code}")
-        d = r.json()
-        if not isinstance(d, dict) or not isinstance(d.get("text"), str):
+        d = post_json(url, {"system": system, "prompt": prompt, "max_new_tokens": MAX_NEW_TOKENS}, timeout)
+        if not isinstance(d.get("text"), str):
             raise ValueError("reply without a text")
         return d["text"]
     return call
 
 
-def pooled_llm(urls: list[str]) -> LLM:
-    """http_llm over several /generate replicas: each call goes to the least busy one, and to another once when the
+def strip_think(text: str) -> str:
+    """text without its <think>…</think> blocks, stripped. A lone </think> (the opening tag lives in the chat
+    template's prompt) drops everything before it; a <think> never closed (cut off at max_tokens) everything after."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    if "</think>" in text:
+        text = text.rpartition("</think>")[2]
+    return text.partition("<think>")[0].strip()
+
+
+def openai_llm(url: str, model: str) -> LLM:
+    """An LLM behind POST url, an OpenAI-style /v1/chat/completions (SGLang): greedy, thinking off (Qwen3.5 thinks
+    by default, which costs seconds the 240 s job deadline cannot spare)."""
+    def call(system: str, prompt: str, timeout: float) -> str:
+        d = post_json(url, {"model": model,
+                            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                            "max_tokens": MAX_NEW_TOKENS, "temperature": 0,
+                            "chat_template_kwargs": {"enable_thinking": False}}, timeout)
+        try:
+            content = d["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            content = None
+        if not isinstance(content, str):
+            raise ValueError("reply without a message content")
+        return strip_think(content)
+    return call
+
+
+def pooled_llm(urls: list[str], backend: Callable[[str], LLM] = http_llm) -> LLM:
+    """backend(url) over several replicas: each call goes to the least busy one, and to another once when the
     chosen one refuses the connection."""
     pool = replicas.Pool(urls)
-    calls = {u: http_llm(u) for u in pool.urls}
+    calls = {u: backend(u) for u in pool.urls}
 
     def call(system: str, prompt: str, timeout: float) -> str:
         return replicas.call_with_failover(pool, lambda url, left: calls[url](system, prompt, left), timeout)
     return call
+
+
+def make_llm(kind: str, urls: list[str], model: str) -> LLM:
+    """The pooled LLM client for RAG_LLM_KIND: iv3 (/generate) or openai (chat completions for model)."""
+    if kind == "iv3":
+        return pooled_llm(urls)
+    if kind == "openai":
+        return pooled_llm(urls, lambda url: openai_llm(url, model))
+    raise ValueError(f"RAG_LLM_KIND must be iv3 or openai, not {kind!r}")
 
 
 def catalogue_quote(clause: Clause, candidates: list[dict], rule_id: str, clauses: list[Clause]) -> str | None:
@@ -189,9 +241,14 @@ async def lifespan(app: FastAPI):
     app.state.index = Index(clauses)
     log.info("indexed %d clauses, %d passages in %.1f s", len(clauses), len(passages(clauses)),
              time.perf_counter() - t0)
-    urls = replicas.parse_urls(os.environ.get("RAG_LLM_URLS"), os.environ.get("RAG_LLM_URL", LLM_URL))
-    app.state.llm, app.state.llm_timeout = pooled_llm(urls), float(os.environ.get("RAG_LLM_TIMEOUT", LLM_TIMEOUT))
-    log.info("LLM at %s, timeout %.0f s", ", ".join(urls), app.state.llm_timeout)
+    kind = os.environ.get("RAG_LLM_KIND", LLM_KIND)
+    model = os.environ.get("RAG_LLM_MODEL", CHAT_MODEL)
+    urls = replicas.parse_urls(os.environ.get("RAG_LLM_URLS"),
+                               os.environ.get("RAG_LLM_URL", CHAT_URL if kind == "openai" else LLM_URL))
+    app.state.llm = make_llm(kind, urls, model)
+    app.state.llm_timeout = float(os.environ.get("RAG_LLM_TIMEOUT", LLM_TIMEOUT))
+    log.info("LLM %s%s at %s, timeout %.0f s", kind, f" {model}" if kind == "openai" else "", ", ".join(urls),
+             app.state.llm_timeout)
     yield
     app.state.index = app.state.llm = None
 
