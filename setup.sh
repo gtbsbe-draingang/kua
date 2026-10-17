@@ -15,7 +15,7 @@
 #   main       env/main: API + VideoJev-4B (torch 2.8.0+cu128, transformers 5.14.1)
 #   iv3        env/iv3: InternVideo3-8B server (torch 2.8.0+cu128, transformers 4.57.3)
 #   vlm        env/vlm: SGLang for the Qwen3.5-9B judge (CUDA 12 build, see below)
-#   weights    hf download of the four models into HF_HOME, then a shard check
+#   weights    hf download of the five models into HF_HOME, then a shard check
 #
 # vlm's architecture check needs the weights; it is deferred (logged) until they
 # exist, and the weights target runs it once env/vlm exists.
@@ -103,11 +103,14 @@ TOOLCHAIN_SPECS=(
 )
 
 # Models: repo id, then hf download --exclude patterns (junk the author uploaded).
+# bge-m3 keeps only what AutoTokenizer + AutoModel need for the dense embedding:
+# config, tokenizer files and pytorch_model.bin (the repo has no safetensors file).
 MODELS=(
   "ZhuYuhan/VideoJev-4B"
   "yanziang/InternVideo3-8B-Instruct|.claude/*|__pycache__/*"
   "Qwen/Qwen3.5-9B"
   "PekingU/rtdetr_r50vd_coco_o365"
+  "BAAI/bge-m3|onnx/*|imgs/*|*.jpg|*.webp|colbert_linear.pt|sparse_linear.pt"
 )
 
 log() { printf '[%s] %s\n' "$(date -u '+%F %T')" "$*"; }
@@ -341,7 +344,7 @@ sys.exit(0 if set(archs) <= set(names) else "sglang has no model class for this 
 PY
 }
 
-# Download the four models into HF_HOME (resumable), then check every shard
+# Download the five models into HF_HOME (resumable), then check every shard
 # against its index: each tensor the index names must sit in the shard it names.
 build_weights() {
   local spec repo pats args
@@ -369,6 +372,15 @@ ref = (base / "refs" / "main").read_text().strip()
 snap = base / "snapshots" / ref
 incomplete = list((base / "blobs").glob("*.incomplete"))
 idx = snap / "model.safetensors.index.json"
+if not idx.exists() and not (snap / "model.safetensors").exists():
+    # a pickle-zip checkpoint (the bge-m3 embedder): check the archive opens and lists its tensors
+    import zipfile
+    with zipfile.ZipFile(snap / "pytorch_model.bin") as z:
+        entries = [n for n in z.namelist() if "/data/" in n]
+    size = sum(p.stat().st_size for p in (base / "blobs").iterdir() if p.is_file())
+    print(f"{base.name}: rev {ref[:12]} | pytorch_model.bin, {len(entries)} tensor storages | "
+          f"incomplete files {len(incomplete)} | {size/1e9:.2f} GB")
+    sys.exit(1 if (incomplete or not entries) else 0)
 if idx.exists():
     index = json.loads(idx.read_text())["weight_map"]
 else:  # a single-file checkpoint (the person detector): its one file holds every tensor
