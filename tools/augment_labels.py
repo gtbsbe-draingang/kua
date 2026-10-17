@@ -32,7 +32,7 @@ def unique_clips(rows, only=None):
 
 
 def resolve(clips_dir, clip):
-    hits = [p for p in Path(clips_dir).glob("*.mov") if norm(p.stem) == clip]
+    hits = [p for p in Path(clips_dir).iterdir() if p.suffix.lower() == ".mov" and norm(p.stem) == clip]
     if len(hits) != 1:
         sys.exit(f"augment: {clip}: expected one .mov in {clips_dir}, found {len(hits)}")
     return hits[0]

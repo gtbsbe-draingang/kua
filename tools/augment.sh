@@ -15,8 +15,12 @@ while [ $# -gt 0 ]; do
 done
 [ ${#POS[@]} -eq 4 ] || usage
 CLIPS="${POS[0]}"; LABELS="${POS[1]}"; OUT="${POS[2]}"; OUT_LABELS="${POS[3]}"
+case "$JOBS" in ''|*[!0-9]*|0) echo "augment: -j must be a positive integer" >&2; exit 2 ;; esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${PYTHON:-python3}"
+if "$PY" -c 'import os,sys; sys.exit(0 if os.path.realpath(sys.argv[1])==os.path.realpath(sys.argv[2]) else 1)' "$LABELS" "$OUT_LABELS"; then
+  echo "augment: out_labels_csv must differ from labels_csv (would overwrite the source labels)" >&2; exit 2
+fi
 mkdir -p "$OUT"
 
 vf_for() {
@@ -35,8 +39,8 @@ make_one() {  # clip src variant filter outdir
     echo "skip  $clip-$v"; return 0
   fi
   rm -f "$tmp"
-  if ffmpeg -nostdin -hide_banner -loglevel error -y -threads 2 -i "$src" -vf "$vf" \
-       -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -an -movflags +faststart "$tmp" \
+  if ffmpeg -nostdin -hide_banner -loglevel error -y -i "$src" -vf "$vf" \
+       -threads 2 -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -an -movflags +faststart "$tmp" \
      && mv "$tmp" "$dst"; then
     echo "made  $clip-$v"
   else
@@ -47,6 +51,8 @@ export -f make_one
 
 PLAN="$("$PY" "$HERE/augment_labels.py" plan "$CLIPS" "$LABELS" ${ONLY:+--only "$ONLY"})"
 [ -n "$PLAN" ] || { echo "augment: no clips to process" >&2; exit 1; }
+
+while IFS=$'\t' read -r clip _; do rm -f "$OUT/.$clip"-*.part.mov; done <<<"$PLAN"
 
 jobs_file="$(mktemp)"; trap 'rm -f "$jobs_file"' EXIT
 while IFS=$'\t' read -r clip src; do

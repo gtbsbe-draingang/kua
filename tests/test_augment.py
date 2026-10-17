@@ -30,3 +30,15 @@ def test_only_and_cyrillic(tmp_path):
     rows = [{"clip": "X-1", "angle": "main", "source": "given", "note": ""},
             {"clip": "X-3", "angle": "main", "source": "given", "note": ""}]
     assert len(al.augment_rows(rows, ["X-3"])) == 4
+
+
+def test_two_row_clip(tmp_path):
+    src = tmp_path / "l.csv"
+    src.write_text(HEAD + "X-4,1,57,,,,main,given,\nX-4,1,68,,,,main,given,m\nX-5,0,,,,,main,given,\n")
+    assert al.write_labels(src, tmp_path / "o.csv", ["X-4"]) == 8
+    assert [r["t_label"] for r in csv.DictReader(open(tmp_path / "o.csv"))][::4] == ["57", "68"]
+
+
+def test_uppercase_ext(tmp_path):
+    (tmp_path / "X-2.MOV").write_bytes(b"")
+    assert al.resolve(tmp_path, "X-2").name == "X-2.MOV"
