@@ -684,9 +684,8 @@
     else eventsEl.appendChild(renderEmpty());
 
     setupVideo(typeof job.video_url === "string" ? job.video_url : "");
-    renderTimeline();
-
     resultEl.hidden = false;
+    renderTimeline(); // after un-hiding: the marker layout measures the track's real width
     try { verdictEl.focus({ preventScroll: true }); } catch (e) { verdictEl.focus(); }
     scrollIntoViewSoft(resultEl, "start");
   }
@@ -706,12 +705,15 @@
     return s;
   }
 
-  function linkHost(url) {
-    try {
-      var u = new URL(url);
-      if (u.protocol !== "https:" && u.protocol !== "http:") return "";
-      return u.hostname.replace(/^www\./, "");
-    } catch (e) { return ""; }
+  // A source link is shown only for https pages of the two official publishers of the acts; any other
+  // URL (http, another host, credentials in the URL, not a URL) gets no link, the citation text stays.
+  var SOURCE_HOSTS = ["adilet.zan.kz", "www.adilet.zan.kz", "nationalbank.kz", "www.nationalbank.kz"];
+
+  function sourceLink(url) {
+    var u;
+    try { u = new URL(url); } catch (e) { return null; }
+    if (u.protocol !== "https:" || u.username || u.password || SOURCE_HOSTS.indexOf(u.hostname) === -1) return null;
+    return { href: u.href, host: u.hostname.replace(/^www\./, "") };
   }
 
   function renderCard(e, i) {
@@ -768,20 +770,20 @@
 
     var r = v.rule && typeof v.rule === "object" ? v.rule : {};
     var doc = str(r.document), clause = str(r.clause), quote = str(r.quote), url = str(r.url);
-    var host = url ? linkHost(url) : "";
-    if (doc || clause || quote || host) {
+    var link = url ? sourceLink(url) : null;
+    if (doc || clause || quote || link) {
       var s3 = section("Правило и источник");
       if (doc) s3.appendChild(el("p", "rule-doc", doc));
       if (clause) s3.appendChild(el("p", "rule-clause", clause));
       if (quote) s3.appendChild(el("blockquote", null, "«" + quote.replace(/^[«"]+|[»"]+$/g, "") + "»"));
-      if (host) {
+      if (link) {
         var a = el("a", "src-link");
-        a.href = url;
+        a.href = link.href;
         a.target = "_blank";
         a.rel = "noopener noreferrer";
-        a.appendChild(document.createTextNode("Открыть на " + host));
+        a.appendChild(document.createTextNode("Открыть на " + link.host));
         a.appendChild(icon("external"));
-        a.setAttribute("aria-label", "Открыть на " + host + " (в новой вкладке)");
+        a.setAttribute("aria-label", "Открыть на " + link.host + " (в новой вкладке)");
         s3.appendChild(a);
       }
       card.appendChild(s3);
@@ -980,20 +982,47 @@
 
   function pct(t, d) { return (Math.max(0, Math.min(1, t / d)) * 100).toFixed(3) + "%"; }
 
-  // Markers closer than their own width go to a higher lane, so every number stays readable and clickable.
+  // Markers sit in up to MARK_LANES lanes above the track. Each takes the lane where it needs the least
+  // sideways shift to stay a full marker width from its neighbour (a tight cluster first stacks up, then
+  // spreads sideways); a shifted marker draws a foot along the track edge back to its true time. So every
+  // marker stays visible and clickable, and the strip grows to at most MARK_LANES rows.
+  var MARK_GAP = 30, LANE_H = 30, MARK_LANES = 4;
+
   function layoutMarks() {
-    var w = tlTrack.clientWidth || 1, d = duration(), gap = 30, lanes = [], maxLane = 0;
-    events.forEach(function (e, i) {
+    var w = tlTrack.clientWidth, d = duration();
+    if (!(w > 0) || !(d > 0)) return;
+    var lastX = [], placed = [], maxLane = 0, l, k;
+    for (l = 0; l < MARK_LANES; l++) lastX.push(-Infinity);
+    events.forEach(function (e, i) { // events are sorted by timecode
       if (!marks[i]) return;
-      var x = Math.max(0, Math.min(1, e.timecode / d)) * w, lane = 0;
-      while (lane < lanes.length && x - lanes[lane] < gap) lane++;
-      if (lane > 2) lane = 2;
-      lanes[lane] = x;
-      maxLane = Math.max(maxLane, lane);
-      marks[i].style.bottom = (4 + lane * 30) + "px";
-      marks[i].style.setProperty("--stem", (6 + lane * 30) + "px");
+      var x = Math.max(0, Math.min(1, e.timecode / d)) * w, lane = 0, pos = Infinity;
+      for (var c = 0; c < MARK_LANES; c++) {
+        var cand = Math.max(x, lastX[c] + MARK_GAP);
+        if (cand < pos - 0.01) { lane = c; pos = cand; } // ties keep the lower lane
+      }
+      lastX[lane] = pos;
+      placed.push({ i: i, x: x, lane: lane, pos: pos });
     });
-    tlMarks.style.height = (30 + maxLane * 30) + "px";
+    // markers pushed past the right end are pulled back left, keeping the spacing inside each lane
+    for (l = 0; l < MARK_LANES; l++) {
+      var limit = w;
+      for (k = placed.length - 1; k >= 0; k--) {
+        if (placed[k].lane !== l) continue;
+        placed[k].pos = Math.max(0, Math.min(placed[k].pos, limit));
+        limit = placed[k].pos - MARK_GAP;
+      }
+    }
+    placed.forEach(function (p) {
+      var m = marks[p.i], dx = p.pos - p.x;
+      maxLane = Math.max(maxLane, p.lane);
+      m.style.left = p.pos.toFixed(1) + "px";
+      m.style.bottom = (4 + p.lane * LANE_H) + "px";
+      m.style.zIndex = String(10 - p.lane); // lower lanes draw over the stems of higher ones
+      m.style.setProperty("--stem", (6 + p.lane * LANE_H) + "px");
+      m.style.setProperty("--foot-x", (dx > 0 ? -dx : 0).toFixed(1) + "px");
+      m.style.setProperty("--foot-w", (Math.abs(dx) < 1 ? 0 : Math.abs(dx)).toFixed(1) + "px");
+    });
+    tlMarks.style.height = (30 + maxLane * LANE_H) + "px";
   }
 
   function renderScale(d) {

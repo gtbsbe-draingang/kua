@@ -521,20 +521,19 @@ main { display: grid; gap: calc(var(--shadow) + 22px); padding-bottom: 48px; }
   color: var(--violet-950);
   font: 12px/1 var(--font-pixel);
 }
-.tl-mark::after {
+/* stem down to the track; foot along the track edge back to the true time when the marker was shifted */
+.tl-mark::after, .tl-mark::before {
   content: "";
   position: absolute;
-  left: 50%;
-  top: 100%;
-  width: 2px;
-  height: var(--stem, 6px);
-  transform: translateX(-50%);
   background: var(--violet-400);
+  pointer-events: none;
 }
+.tl-mark::after { left: calc(50% - 1px); top: 100%; width: 2px; height: var(--stem, 6px); }
+.tl-mark::before { left: calc(50% - 1px + var(--foot-x, 0px)); top: calc(100% + var(--stem, 6px) - 2px); width: calc(var(--foot-w, 0px) + 2px); height: 2px; }
 .tl-mark:hover { background: var(--violet-300); }
-.tl-mark:hover::after { background: var(--violet-300); }
-.tl-mark.is-current { background: var(--ink); box-shadow: 0 0 0 4px rgba(155, 123, 255, 0.45); }
-.tl-mark.is-current::after { background: var(--ink); }
+.tl-mark:hover::after, .tl-mark:hover::before { background: var(--violet-300); }
+.tl-mark.is-current { z-index: 20 !important; background: var(--ink); box-shadow: 0 0 0 4px rgba(155, 123, 255, 0.45); }
+.tl-mark.is-current::after, .tl-mark.is-current::before { background: var(--ink); }
 
 .tl-track {
   position: relative;
