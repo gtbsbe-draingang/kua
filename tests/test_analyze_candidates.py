@@ -115,3 +115,26 @@ def test_shared_prefix_stops_at_the_first_difference_or_marker():
     assert dg.shared_prefix([[1, 2, 3, 9, 5, 7], [1, 2, 3, 4, 5, 7], [1, 2, 3, 4, 8, 7]], {7}) == 3
     assert dg.shared_prefix([[1, 2, 3, 7, 5], [1, 2, 3, 7, 6]], {7}) == 3
     assert dg.shared_prefix([[1, 2, 7]], {7}) == 2
+
+
+def test_cells_cover_a_short_clip_and_rank_a_long_one():
+    short = _clip("X-1", 1, [9.0], {"q": [0.5] * 20}, {"q": ["r"]})  # 20 s: 5 cells of 4 s, all kept
+    cs = ac.gen_cells(short, 4.0, 6, "logit")
+    assert [(c["t_start"], c["t_end"], c["timecode"]) for c in cs] == [
+        (0.0, 4.0, 2.0), (4.0, 8.0, 6.0), (8.0, 12.0, 10.0), (12.0, 16.0, 14.0), (16.0, 20.0, 18.0)]
+    curve = [0.9] * 40
+    curve[33] = 0.99  # 40 s: 10 cells, only the top 2 kept; the bump's cell first by score
+    long = _clip("X-2", 1, [33.0], {"q": curve, "p": [0.2] * 40}, {"q": ["r"], "p": ["s"]})
+    top = ac.gen_cells(long, 4.0, 2, "logit")
+    assert len(top) == 2 and any(c["t_start"] == 32.0 and c["timecode"] == 34.0 and c["rule"] == "r" for c in top)
+    assert ac.gen_cells(long, 4.0, 2, "logit", anchor="peak")[-1]["timecode"] == 33.25
+
+
+def test_keep_table_counts_found_clips_and_fp_clips():
+    import verify_candidates as vc
+
+    labels = {"X-1": {"has_violation": 1, "truth": [{"t_label": 10.0}]},
+              "X-2": {"has_violation": 0, "truth": []}}
+    rows = [{"clip": "X-1", "timecode": 11.0, "p_yes": 0.4}, {"clip": "X-1", "timecode": 20.0, "p_yes": 0.9},
+            {"clip": "X-2", "timecode": 3.0, "p_yes": 0.3}, {"clip": "X-2", "timecode": 9.0, "p_yes": None}]
+    assert vc.keep_table(rows, labels, [0.2, 0.35, 0.5]) == [(0.2, 1.0, 1, 1), (0.35, 1.0, 1, 0), (0.5, 0.0, 0, 0)]

@@ -443,6 +443,27 @@ def query_table(clips: list[Clip]) -> list[dict]:
     return sorted(rows, key=lambda r: -r["label_pct"])
 
 
+def compare_dumps(a: list[Clip], b: list[Clip]) -> list[dict]:
+    """Per clip present in both: the absolute difference of every query curve (max, mean, its 95th
+    percentile), of the first query alone, the share of rule-curve cells >= 0.5 in each, and how often the
+    decoded intervals agree."""
+    other = {c.name: c for c in b}
+    rows = []
+    for c in a:
+        d = other.get(c.name)
+        if d is None or len(d.times) != len(c.times):
+            continue
+        diff = np.concatenate([np.abs(c.q[q] - d.q[q]) for q in c.queries])
+        q0 = c.queries[0]
+        same_iv = [c.intervals.get(q) == d.intervals.get(q) for q in c.queries if c.intervals.get(q)]
+        rows.append({"clip": c.name, "max": float(diff.max()), "mean": float(diff.mean()),
+                     "p95": float(np.percentile(diff, 95)), "first_query_max": float(np.abs(c.q[q0] - d.q[q0]).max()),
+                     "on_a": float(np.mean([x >= 0.5 for r in c.rules.values() for x in r])),
+                     "on_b": float(np.mean([x >= 0.5 for r in d.rules.values() for x in r])),
+                     "same_interval": float(np.mean(same_iv)) if same_iv else None})
+    return rows
+
+
 def fmt_row(name: str, m: dict) -> str:
     a = "-" if m["auc"] is None else f"{m['auc']:.3f}"
     lr = "-" if m["long_recall"] is None else f"{m['long_recall']:.3f}"
@@ -463,6 +484,7 @@ def main(argv=None) -> int:
     ap.add_argument("--best", type=int, default=5, help="rows per family in the printed tables")
     ap.add_argument("--families", default=",".join(FAMILIES))
     ap.add_argument("--queries", action="store_true", help="print the per-query table")
+    ap.add_argument("--compare", help="another dump folder: print curve differences per clip, then exit")
     ap.add_argument("--loo", action="append", default=[], help="family to report leave-one-out for")
     ap.add_argument("--export", action="append", default=[],
                     help='NAME=FAMILY:JSON_PARAMS, e.g. h4=h:{"cell":4.0,"kind":"logit","anchor":"center",'
@@ -477,6 +499,20 @@ def main(argv=None) -> int:
           f"{LONG_SEC:g} s), {sum(1 - c.has_violation for c in clips)} clean; duration median "
           f"{np.median([c.duration for c in clips]):.1f} s (min {min(c.duration for c in clips):.1f}, "
           f"max {max(c.duration for c in clips):.1f})")
+    if a.compare:
+        rows = compare_dumps(clips, load_dump(a.compare))
+        print(f"\n### {a.dump} vs {a.compare}: |difference| of the query curves\n"
+              "| clip | max | p95 | mean | first query max | rule cells >= 0.5 (a / b) | same interval |\n"
+              "|---|---|---|---|---|---|---|")
+        for r in rows:
+            si = "-" if r["same_interval"] is None else f"{r['same_interval']:.2f}"
+            print(f"| {r['clip']} | {r['max']:.3f} | {r['p95']:.3f} | {r['mean']:.3f} | {r['first_query_max']:.3f} | "
+                  f"{r['on_a']:.2f} / {r['on_b']:.2f} | {si} |")
+        if rows:
+            print(f"| all {len(rows)} | {max(r['max'] for r in rows):.3f} | - | "
+                  f"{np.mean([r['mean'] for r in rows]):.3f} | {max(r['first_query_max'] for r in rows):.3f} | "
+                  f"{np.mean([r['on_a'] for r in rows]):.2f} / {np.mean([r['on_b'] for r in rows]):.2f} | - |")
+        return 0
     if a.queries:
         print("\n### per query\n| label_pct | auc vs clean | on_clean | rule | query |\n|---|---|---|---|---|")
         for r in query_table(clips):

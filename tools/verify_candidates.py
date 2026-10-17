@@ -216,7 +216,7 @@ def cmd_report(a) -> int:
                   f"p_yes {f3(auc(cpos, cneg))} ({len(cpos)} vs {len(cneg)}) | mean p_yes matched "
                   f"{f3(sum(pos) / len(pos) if pos else None)}, clean {f3(sum(neg) / len(neg) if neg else None)}"
                   f" | verify {sum(secs) / len(secs):.2f} s mean, {max(secs):.2f} s max")
-            if want is None:
+            if want is None and len(got) == len(rows):  # keep tables only over complete coverage
                 vs = [round(0.05 * i, 2) for i in range(1, 20)]
                 print("| v | recall (clips) | found | FP clips |\n|---|---|---|---|")
                 for v, rec, found, fp in keep_table(got, labels, vs):
