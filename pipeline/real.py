@@ -5,11 +5,13 @@ each moment, an optional judge picks the rule and words the justification, and e
 Recall comes first: a failed or late model call can only fall back to the grounding score; it never drops
 a moment that grounding alone would keep.
 
-Candidates come from one of two generators, chosen by `generator` in thresholds.json:
+Candidates come from one of three generators, chosen by `generator` in thresholds.json:
 - "cells" (the default since Task 7C-2): the clip is cut into cell_sec cells, ranked by how far the grounding
   scores inside each stand above their query's clip median (logic.cells); the top_k cells are checked, each
   with the cell centre as its timecode. If grounding fails or gives no usable scores, top_k cells spread
   evenly over the clip are checked instead, and InternVideo3 alone decides.
+- "grid" (the live choice since Task 12): top_k cells spread evenly over the clip (logic.even_cells), checked by
+  InternVideo3 alone. VideoJev is never loaded or called; a cell without an answer is kept (recall first).
 - "segments" (the original design): runs of a rule's grounding score >= cand, merged across rules.
 
 Two switches in thresholds.json change how each window is checked; both are off when a file leaves them out:
@@ -71,11 +73,12 @@ NORMALIZE_MAX_SEC, NORMALIZE_MIN_SEC = 120.0, 5.0
 TH_KEYS = ("generator", "cand", "verify", "strong", "fallback", "top_k", "merge_sec", "anchor",
            "anchor_offset_sec")
 CELLS_KEYS = ("cell_sec", "rank")  # required by the cells generator
+GRID_KEYS = ("cell_sec",)  # required by the grid generator (no rank: nothing is ranked)
 TH_DEFAULTS = {"zoom": False, "verify_mode": "single"}  # the switches, as a file without them runs
 VERIFY_MODES = ("single", "multi")
-GENERATORS = ("cells", "segments")
+GENERATORS = ("cells", "segments", "grid")
 RANKS = ("logit",)
-ANCHORS = ("peak", "onset", "center")  # cells always use the centre; segments take peak or onset
+ANCHORS = ("peak", "onset", "center")  # cells and grid always use the centre; segments take peak or onset
 FALLBACK_RULE = "other"  # the rule of an unscored cell: the generic catch-all
 
 
@@ -149,6 +152,8 @@ def _load_thresholds(path: Path) -> dict:
     missing = [k for k in TH_KEYS if k not in th]
     if th.get("generator") == "cells":
         missing += [k for k in CELLS_KEYS if k not in th]
+    elif th.get("generator") == "grid":
+        missing += [k for k in GRID_KEYS if k not in th]
     if missing:
         raise ValueError(f"{path}: missing {', '.join(missing)}")
     if th["generator"] not in GENERATORS:
@@ -166,8 +171,8 @@ def _load_thresholds(path: Path) -> dict:
         raise ValueError(f"{path}: top_k must be a positive integer")
     if th["anchor"] not in ANCHORS:
         raise ValueError(f"{path}: anchor must be one of {', '.join(ANCHORS)}, not {th['anchor']!r}")
-    if th["anchor"] == "center" and th["generator"] != "cells":
-        raise ValueError(f"{path}: anchor 'center' needs the cells generator; segments take 'peak' or 'onset'")
+    if th["anchor"] == "center" and th["generator"] not in ("cells", "grid"):
+        raise ValueError(f"{path}: anchor 'center' needs the cells or grid generator; segments take 'peak' or 'onset'")
     if not isinstance(th["zoom"], bool):
         raise ValueError(f"{path}: zoom must be true or false")
     if th["verify_mode"] not in VERIFY_MODES:
@@ -215,9 +220,13 @@ def _config() -> _Config:
 
 
 def warmup() -> None:
-    """Load the rules, the thresholds and VideoJev now (at server start), not on the first job."""
-    _config()
+    """Load the rules and the thresholds now (at server start), not on the first job; and VideoJev too, unless
+    the grid generator is configured: it never uses VideoJev, so the API process must not put it on the GPU."""
+    cfg = _config()
     log.info("video encoder for internal copies: %s", frames.video_encoder())
+    if cfg.th["generator"] == "grid":
+        log.info("generator grid: VideoJev is not loaded")
+        return
     videojev.get().load()
 
 
@@ -346,6 +355,15 @@ def _cell_candidates(curves, cfg: _Config, duration: float, th: dict) -> tuple[l
         ground = max((curve[i] for curve in cs for i in c.members), default=0.0)
         out.append(_Cand(rid, float(ground), c.t_start, c.t_end, _clamp(c.centre + off, duration), rank=c.rank))
     return out, False
+
+
+def _grid_keep(p_yes: float | None, th: dict) -> tuple[bool, str]:
+    """The grid's keep rule: a cell InternVideo3 answered is kept when p_yes >= verify; a cell without an answer
+    (a failed or late call, no window) is kept too, as recall comes first. There is no grounding score to fall
+    back on, so `strong` and `fallback` play no part."""
+    if p_yes is None:
+        return True, "fallback_no_vlm"
+    return (True, "verified") if p_yes >= th["verify"] else (False, "rejected")
 
 
 def _verify_rules(cfg: _Config, grounded: str) -> list[dict]:
@@ -486,40 +504,49 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
 
     # 2. grounding: one VideoJev pass with every query; candidates over all rules. With the cells generator a
     # failed grounding call (an error, or the model busy for too long) leaves evenly spaced cells to check.
-    on_stage("grounding")
-    t0 = time.monotonic()
-    gt = max(0.0, _left(deadline) - GROUND_START_RESERVE_SEC)
+    # The grid generator skips grounding altogether: VideoJev is never called, and the windows start now.
+    grid = th["generator"] == "grid"
     use_cells = th["generator"] == "cells"
-    curves = None
-    try:
-        with model_wait(gt):
-            curves = ground(src, cfg.queries)
-    except videojev.ModelBusy as e:
-        if not use_cells:
-            raise DeadlineExceeded(f"VideoJev stayed busy with other jobs, so grounding could not start at least "
-                                   f"{GROUND_START_RESERVE_SEC:.0f} s before the deadline") from e
-        log.warning("grounding skipped (%s); the candidates are evenly spaced cells", e)
-    except Exception as e:
-        if not use_cells:
-            raise
-        log.warning("grounding failed (%s: %s); the candidates are evenly spaced cells", type(e).__name__, e)
-    if _left(deadline) - VERIFY_RESERVE_SEC < VERIFY_MIN_SEC:
-        log.warning("grounding finished %.1f s before the deadline: too late for the check step; "
-                    "events are kept on grounding scores alone", _left(deadline))
     cands: list[_Cand] = []
     grid_fallback = False
-    if use_cells:
-        cands, grid_fallback = _cell_candidates(curves, cfg, duration, th)
+    if grid:
+        t0 = time.monotonic()
+        off = float(th["anchor_offset_sec"])
+        cands = [_Cand(_fallback_rule(cfg), 0.0, c.t_start, c.t_end, _clamp(c.centre + off, duration))
+                 for c in even_cells(duration, float(th["cell_sec"]), int(th["top_k"]))]
+        lap("grid", t0)
     else:
-        rule_curves, n = _rule_curves(curves, cfg)
-        if n:
-            tl = _timeline(curves, n, duration)
-            per_rule = {rid: segments(c, tl.step, float(th["cand"])) for rid, c in rule_curves.items()}
-            cands = [_candidate(rid, s, e, sc, rule_curves[rid], tl, duration, th)
-                     for rid, s, e, sc in top_candidates(per_rule, int(th["top_k"]))]
-            for r, c in enumerate(cands):  # top_candidates gives them best first
-                c.rank = r
-    lap("grounding", t0)
+        on_stage("grounding")
+        t0 = time.monotonic()
+        gt = max(0.0, _left(deadline) - GROUND_START_RESERVE_SEC)
+        curves = None
+        try:
+            with model_wait(gt):
+                curves = ground(src, cfg.queries)
+        except videojev.ModelBusy as e:
+            if not use_cells:
+                raise DeadlineExceeded(f"VideoJev stayed busy with other jobs, so grounding could not start at least "
+                                       f"{GROUND_START_RESERVE_SEC:.0f} s before the deadline") from e
+            log.warning("grounding skipped (%s); the candidates are evenly spaced cells", e)
+        except Exception as e:
+            if not use_cells:
+                raise
+            log.warning("grounding failed (%s: %s); the candidates are evenly spaced cells", type(e).__name__, e)
+        if _left(deadline) - VERIFY_RESERVE_SEC < VERIFY_MIN_SEC:
+            log.warning("grounding finished %.1f s before the deadline: too late for the check step; "
+                        "events are kept on grounding scores alone", _left(deadline))
+        if use_cells:
+            cands, grid_fallback = _cell_candidates(curves, cfg, duration, th)
+        else:
+            rule_curves, n = _rule_curves(curves, cfg)
+            if n:
+                tl = _timeline(curves, n, duration)
+                per_rule = {rid: segments(c, tl.step, float(th["cand"])) for rid, c in rule_curves.items()}
+                cands = [_candidate(rid, s, e, sc, rule_curves[rid], tl, duration, th)
+                         for rid, s, e, sc in top_candidates(per_rule, int(th["top_k"]))]
+                for r, c in enumerate(cands):  # top_candidates gives them best first
+                    c.rank = r
+        lap("grounding", t0)
 
     pool = ThreadPoolExecutor(max_workers=POOL_SIZE, thread_name_prefix="review")
     pools.append(pool)
@@ -560,7 +587,7 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
                    else pool.submit(verify, c.window, _verify_rules(cfg, c.rule_id), vt)
                    for k, c in enumerate(cands) if c.window}
     t1 = time.monotonic()
-    for c in cands:
+    for c in ([] if grid else cands):  # the grid never asks VideoJev for a type
         if c.window is None:
             continue
         budget = _left(deadline) - CHOOSE_MIN_LEFT_SEC  # how long this choice may wait for the model
@@ -596,9 +623,14 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     # rule the check answered YES to (vtype), otherwise VideoJev's best type.
     events = []
     for c in cands:
-        kept, reason = keep_decision(c.score, c.p_yes, c.p_yes is not None, th)
+        if grid:
+            kept, reason = _grid_keep(c.p_yes, th)
+        else:
+            kept, reason = keep_decision(c.score, c.p_yes, c.p_yes is not None, th)
         rid = c.rule_id
-        if kept:
+        if kept and grid:
+            rid = c.vtype if c.vtype in cfg.detectable else _fallback_rule(cfg)
+        elif kept:
             rid = c.vtype if multi and c.vtype in cfg.detectable else _best_type(c.type_probs, c.rule_id)
         events.append(Event(rule_id=rid, t_start=c.t_start, t_end=c.t_end, timecode=c.timecode, ground_score=c.score,
                             type_probs=c.type_probs, verify_score=c.p_yes, kept=kept, reason=reason,
@@ -622,6 +654,8 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     def candidate_ids(ev: Event, c: _Cand) -> list[str]:
         # multi mode ranks the rules by the check's answers; without any (or in single mode) by VideoJev's choice
         answered = {r: p for r, p in (c.p_rules or {}).items() if p is not None}
+        if grid:  # no VideoJev choice: the check's own answers, if any
+            return judge_candidates(answered, ev.rule_id if ev.rule_id in cfg.detectable else "")
         return judge_candidates(answered or ev.type_probs or {c.rule_id: 1.0},
                                 c.vtype if c.vtype in cfg.detectable else "")
 
@@ -657,8 +691,8 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     timings["total"] = round(time.monotonic() - t_all, 3)
     versions = {
         "pipeline": "real",
-        "videojev": videojev.get().version(),
-        "ground_fps": f"{videojev.GROUND_FPS:g}",
+        "videojev": "off" if grid else videojev.get().version(),
+        "ground_fps": "off" if grid else f"{videojev.GROUND_FPS:g}",
         "verifier": f"{clients.IV3_MODEL} at {', '.join(clients.iv3_urls())}",
         "judge": (f"{os.environ.get('JUDGE_MODEL', clients.JUDGE_MODEL)} at "
                   f"{os.environ.get('JUDGE_URL', clients.JUDGE_URL)}") if clients.judge_enabled() else "off",
@@ -669,4 +703,4 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     }
     verdict = "violation" if any(e.kept for e in events) else "no_violation"
     return PipelineResult(verdict, events, timings, versions, generator=th["generator"],
-                          cell_sec=float(th["cell_sec"]) if use_cells else None, generator_fallback=grid_fallback)
+                          cell_sec=float(th["cell_sec"]) if use_cells or grid else None, generator_fallback=grid_fallback)

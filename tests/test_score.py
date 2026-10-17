@@ -296,6 +296,28 @@ def test_sweep_writes_the_run_switches(tmp_path):
         assert (th["zoom"], th["verify_mode"]) == want
 
 
+def test_sweep_grid_run_no_cand_mask(tmp_path, capsys):
+    th = {k: v for k, v in CELLS_TH.items() if k != "rank"} | {"generator": "grid"}
+
+    def grid_done(*events):
+        b = _cells_done(*events)
+        b["debug"]["generator"] = "grid"
+        b["debug"]["versions"]["thresholds"] = json.dumps(th, sort_keys=True)
+        return b
+    # ground_score 0.0 everywhere (no cand mask); X-1's label is in an unanswered cell, kept at every verify
+    run, labels = _write_run(tmp_path, {
+        "X-1": grid_done(_cells_event(10, None, None), _cells_event(30, 0.2, None)),
+        "X-2": grid_done(_cells_event(5, 0.1, None))})
+    out = tmp_path / "t.json"
+    assert _sweep(run, labels, out, keep=ref_keep) == 0
+    text = capsys.readouterr().out
+    assert "grid run" in text and "top_k is not simulated" in text
+    assert _rows(text, 2, 0.95)[0][:5] == ["2", "0.95", "1/1", "1/1", "0/1"]  # only the unanswered cell is kept
+    got = json.loads(out.read_text())
+    assert (got["generator"], got["cell_sec"], got["top_k"], got["strong"]) == ("grid", 4.0, 2, None)
+    assert "cand" in got and got["verify"] == 0.11
+
+
 def test_sweep_refuses_a_run_with_two_generators(tmp_path):
     run, labels = _write_run(tmp_path, {
         "X-1": _cells_done(_cells_event(10, 0.6, 0)), "X-2": _done(_dbg_event(5, 0.3, 0.2))})
