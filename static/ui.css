@@ -154,7 +154,17 @@ code { font: 14px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 
 .masthead { position: relative; padding: 28px 0 32px; }
 
-.masthead-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+/* min-height: the row keeps the height of the .pixels block it used to hold, so the wordmark's accent clears the eyebrow */
+.masthead-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; min-height: 36px; }
+
+.team {
+  font: 14px/1 var(--font-pixel);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+.team b { font-weight: inherit; color: var(--violet-300); }
 
 .pixels {
   flex: none;
@@ -186,6 +196,7 @@ code { font: 14px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 
 @media (min-width: 720px) {
   .masthead { padding: 40px 0 44px; }
+  .masthead-top { min-height: 48px; }
   .pixels { width: 72px; height: 48px; background-size: 24px 24px, 24px 24px, 24px 24px; background-position: 0 0, 24px 0, 48px 24px; }
 }
 

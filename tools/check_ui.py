@@ -148,7 +148,7 @@ def main() -> int:
            index.headers.get("cache-control"))
         refs = page.evaluate("""[...document.querySelectorAll('link[rel=stylesheet], script[src]')]
                                   .map(e => e.getAttribute('href') || e.getAttribute('src'))""")
-        ok("page assets are versioned ?v=3", len(refs) == 3 and all(r.endswith("?v=3") for r in refs), refs)
+        ok("page assets are versioned ?v=4", len(refs) == 3 and all(r.endswith("?v=4") for r in refs), refs)
         ok("key restored and masked", page.input_value("#key") == a.key and page.get_attribute("#key", "type") == "password")
         page.click("#key-toggle")
         ok("key show/hide", page.get_attribute("#key", "type") == "text" and page.get_attribute("#key-toggle", "aria-pressed") == "true")
