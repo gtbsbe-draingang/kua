@@ -298,3 +298,31 @@ def test_to_api_uses_judge_rule_and_sorts(rules):
     assert [v["timecode_sec"] for v in body["violations"]] == [3.0, 9.0]
     assert body["violations"][0]["type_id"] == other
     assert body["violations"][0]["confidence"] == 0.8
+
+
+def test_api_falls_back_to_catalogue_citation(rules):
+    from pipeline.types import Event, Frame
+    from rules import citation_text
+
+    def ev(t, **kw):
+        return Event(rule_id="cash_unattended", t_start=t, t_end=t, timecode=t, ground_score=0.8,
+                     type_probs={}, verify_score=0.6, kept=True, reason="verified", observation="Кассир отходит.",
+                     justification="Текст.", evidence=[Frame(t, b"\xff\xd8z")], **kw)
+
+    def catalogue(rid):
+        c = rules[rid]["citations"][0]
+        return {k: c.get(k, "") for k in ("document", "clause", "quote", "url")}
+
+    other = next(r for r in rules if r != "cash_unattended")
+    res = PipelineResult("violation", [ev(1.0), ev(2.0, judge_rule_id=other, type_source="judge")], {}, {})
+    for v, rid in zip(api.to_api("abc", res, rules)["violations"], ("cash_unattended", other), strict=True):
+        assert v["type_id"] == rid and v["rule"] == catalogue(rid)
+        assert v["description"] == f"Кассир отходит. Текст. Основание: {citation_text(rules[rid])}."
+    # a corpus citation counts only on the judge's own rule
+    cit = {"document": "Документ", "clause": "п. 5", "quote": "Цитата.", "url": "https://adilet.zan.kz/rus/docs/X#z1"}
+    res = PipelineResult("violation", [ev(1.0, citation=cit),
+                                       ev(2.0, judge_rule_id=other, type_source="judge", citation=cit)], {}, {})
+    fallback, judged = api.to_api("abc", res, rules)["violations"]
+    assert fallback["rule"] == catalogue("cash_unattended")
+    assert fallback["description"].endswith(f"Основание: {citation_text(rules['cash_unattended'])}.")
+    assert judged["rule"] == cit and judged["description"] == "Кассир отходит. Текст. Основание: Документ, п. 5."

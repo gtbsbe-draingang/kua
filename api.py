@@ -36,12 +36,16 @@ def _r1(x: float) -> float:
 def to_api(job_id: str, result: PipelineResult, rules: dict) -> dict:
     violations = []
     for ev in sorted((e for e in result.events if e.kept), key=lambda e: e.timecode):
-        rid = ev.judge_rule_id if ev.type_source == "judge" and ev.judge_rule_id in rules else ev.rule_id
+        judged = ev.type_source == "judge" and ev.judge_rule_id in rules
+        rid = ev.judge_rule_id if judged else ev.rule_id
         rule = rules[rid]
-        c = rule["citations"][0]
+        # the judge's corpus citation when it gave one for its rule, else the rule's first catalogue citation
+        cit = ev.citation if judged and ev.citation else None
+        c = cit or rule["citations"][0]
+        basis = f"{cit['document']}, {cit['clause']}" if cit else citation_text(rule)
         desc = " ".join(
             p.strip()
-            for p in (ev.observation, ev.justification, f"Основание: {citation_text(rule)}.")
+            for p in (ev.observation, ev.justification, f"Основание: {basis}.")
             if p and p.strip()
         )
         score = ev.verify_score if ev.verify_score is not None else ev.ground_score
