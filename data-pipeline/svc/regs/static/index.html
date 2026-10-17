@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Поиск по нормативной базе</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6676; --line: #dfe3ea;
+    --accent: #2457c5; --accent-weak: #e8eefb; --mark: #fff0a8;
+    --ok: #1d7a46; --ok-bg: #e5f4ec; --warn: #8a5a00; --warn-bg: #fdf1d9; --off: #6b7280; --off-bg: #eceef1;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1a1f27; --text: #e6e9ef; --muted: #9aa3b2; --line: #2c333f;
+      --accent: #7aa2ff; --accent-weak: #1f2a40; --mark: #5c4d12;
+      --ok: #6fd39b; --ok-bg: #173126; --warn: #f2c26b; --warn-bg: #3a2e14; --off: #a0a7b3; --off-bg: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .acts { display: grid; gap: 4px; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .acts a { color: var(--accent); text-decoration: none; }
+  form { margin-top: 16px; }
+  .qrow { display: flex; gap: 8px; }
+  textarea { flex: 1; min-height: 44px; resize: vertical; padding: 10px 12px; font: inherit; color: var(--text);
+             background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--text); padding: 6px 12px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 0 18px; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { button.primary { color: #0d1220; } }
+  button:disabled { opacity: .55; cursor: default; }
+  .opts { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin-top: 10px; font-size: 14px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg label { padding: 4px 10px; cursor: pointer; border-right: 1px solid var(--line); }
+  .seg label:last-child { border-right: 0; }
+  .seg input { display: none; }
+  .seg input:checked + span { color: var(--accent); font-weight: 600; }
+  .seg label:has(input:checked) { background: var(--accent-weak); }
+  select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+  .docs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .chip { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; border: 1px solid var(--line);
+          border-radius: 999px; padding: 2px 10px; cursor: pointer; background: var(--panel); }
+  .chip input { margin: 0; }
+  .examples { margin-top: 10px; font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .examples button { font-size: 13px; padding: 2px 10px; border-radius: 999px; }
+  .status { margin: 18px 2px 8px; font-size: 13px; color: var(--muted); }
+  .status code { font-family: var(--mono); font-size: 12px; }
+  .error { color: #c0392b; }
+  .hit { margin-top: 10px; }
+  .hit-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+  .rank { font-family: var(--mono); color: var(--muted); font-size: 13px; }
+  .label { font-weight: 700; }
+  .act { color: var(--muted); font-size: 14px; }
+  .badge { font-size: 12px; border-radius: 6px; padding: 1px 8px; }
+  .b-in_force { color: var(--ok); background: var(--ok-bg); }
+  .b-suspended { color: var(--warn); background: var(--warn-bg); }
+  .b-repealed { color: var(--off); background: var(--off-bg); }
+  .crumbs { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .scores { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .text { white-space: pre-wrap; margin: 10px 0 8px; padding: 10px 12px; border-left: 3px solid var(--accent);
+          background: var(--bg); border-radius: 0 6px 6px 0; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; font-size: 13px; }
+  .actions a, .actions button { font-size: 13px; padding: 3px 10px; text-decoration: none; color: var(--accent);
+          border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+  details.notes { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  details.notes p { margin: 4px 0; }
+  .context { margin-top: 10px; display: grid; gap: 6px; }
+  .ctx { font-size: 13px; white-space: pre-wrap; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); }
+  .ctx.cur { border-style: solid; color: var(--text); }
+  .ctx b { color: var(--text); }
+  pre.yaml { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--bg);
+             border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0 0; }
+  .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+           padding: 6px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: .92; }
+  details.settings { margin-top: 10px; font-size: 13px; color: var(--muted); }
+  details.settings input { font: inherit; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px;
+                           background: var(--bg); color: var(--text); width: min(320px, 100%); }
+  footer { margin-top: 28px; font-size: 12px; color: var(--muted); }
+  @media (max-width: 560px) { .qrow { flex-direction: column; } button.primary { padding: 8px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Поиск по нормативной базе</h1>
+  <p class="sub" id="sub">Загрузка сведений об индексе…</p>
+
+  <section class="panel">
+    <div class="acts" id="acts"></div>
+    <form id="form">
+      <div class="qrow">
+        <textarea id="q" rows="2" placeholder="Опишите, что видно на видео, или введите формулировку правила. Например: кассир отходит от рабочего места во время обслуживания клиента" required></textarea>
+        <button class="primary" id="go" type="submit">Найти</button>
+      </div>
+      <div class="opts">
+        <span class="seg" role="radiogroup" aria-label="Режим поиска">
+          <label title="LambdaMART: обученная модель ранжирования по косинусной близости и BM25" id="ltrLabel"><input type="radio" name="mode" value="ltr" checked><span>LambdaMART</span></label>
+          <label title="Плотные векторы + BM25, слияние RRF в Milvus"><input type="radio" name="mode" value="hybrid"><span>Гибридный</span></label>
+          <label title="Только смысловая близость (bge-m3)"><input type="radio" name="mode" value="dense"><span>Смысловой</span></label>
+          <label title="Только совпадение слов (BM25)"><input type="radio" name="mode" value="bm25"><span>BM25</span></label>
+        </span>
+        <label>Результатов
+          <select id="k"><option>5</option><option selected>8</option><option>12</option><option>20</option></select>
+        </label>
+        <label title="Нейросетевой cross-encoder читает запрос и каждый пункт вместе (включается через REGS_RERANK_MODEL)"><input type="checkbox" id="rerank"> Cross-encoder</label>
+        <label title="Добавляет к BM25-запросу юридические формулировки бытовых слов (кассир → кассовый работник)"><input type="checkbox" id="glossary" checked> Глоссарий</label>
+        <label><input type="checkbox" id="repealed"> Показывать исключённые пункты</label>
+      </div>
+      <div class="docs" id="docs"></div>
+      <div class="examples" id="examples"><span>Примеры:</span></div>
+      <details class="settings">
+        <summary>Настройки доступа</summary>
+        <p>Если сервер запущен с REGS_API_KEY, укажите ключ. Он хранится только в этом браузере.</p>
+        <input id="apikey" type="password" autocomplete="off" placeholder="X-API-Key">
+      </details>
+    </form>
+  </section>
+
+  <div class="status" id="status"></div>
+  <div id="results"></div>
+
+  <footer>
+    Результаты поиска служат подсказкой для подготовки ссылок на нормы и не являются юридическим заключением.
+    Тексты загружены с зеркала adilet (zakon.uchet.kz) с сохранением якорей; перед включением цитаты в rules.yaml
+    сверьте действующую редакцию по ссылке «Открыть на adilet».
+  </footer>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const STATUS = { in_force: "действует", suspended: "временная редакция", repealed: "исключён" };
+const EXAMPLES = [
+  "кассир отходит от рабочего места во время обслуживания клиента",
+  "кассир принимает деньги без пересчета в присутствии клиента",
+  "на столе открыто лежат деньги предыдущих клиентов",
+  "кассир пользуется смартфоном в кассе",
+  "посторонний человек заходит в помещение кассы",
+  "кассир принимает инкассаторскую сумку и не проверяет пломбу",
+  "cashier counts banknotes alone without a second employee",
+];
+
+function store(key, value) {
+  try { if (value === undefined) return localStorage.getItem(key); localStorage.setItem(key, value); }
+  catch (e) { return null; }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Highlight words that start with one of the BM25 stems the server used for this query.
+function highlight(text, lexQuery) {
+  const stems = [...new Set((lexQuery || "").split(/\s+/).filter((s) => s.length >= 3 && !/^\d+$/.test(s)))];
+  const safe = escapeHtml(text);
+  if (!stems.length) return safe;
+  return safe.replace(/[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]+/g, (w) => {
+    const n = w.toLowerCase().replace(/ё/g, "е");
+    return stems.some((s) => n.startsWith(s)) ? `<mark>${w}</mark>` : w;
+  });
+}
+
+async function api(path) {
+  const headers = {};
+  const key = store("regs_api_key");
+  if (key) headers["X-API-Key"] = key;
+  const r = await fetch(path, { headers });
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch (e) {}
+    if (r.status === 401) document.querySelector("details.settings").open = true;
+    throw new Error(`${r.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  return r.json();
+}
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), 1400);
+}
+
+async function copy(text, what) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta);
+    ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  toast(`${what} скопировано`);
+}
+
+async function loadStats() {
+  try {
+    const s = await api("/api/regs/stats");
+    $("sub").textContent = `${s.documents.length} акта НБРК · ${s.rows} фрагментов в Milvus · поиск ${s.embed_model}` +
+      (s.reranker ? ` · переранжирование ${s.reranker}` : "") + ` · индекс собран ${s.built_at.slice(0, 16).replace("T", " ")}`;
+    if (!s.reranker) { $("rerank").checked = false; $("rerank").disabled = true; }
+    if (!s.ltr) {
+      document.querySelector('input[name="mode"][value="ltr"]').disabled = true;
+      document.querySelector('input[name="mode"][value="hybrid"]').checked = true;
+      $("ltrLabel").title = "Модель не обучена: python -m regs train-ltr";
+    } else {
+      $("sub").textContent += ` · LambdaMART: top-1 ${s.ltr.cv_dev["hit@1"]} (кросс-валидация на dev)`;
+    }
+    $("acts").innerHTML = s.documents.map((d) =>
+      `<div><a href="${escapeHtml(d.canonical_url)}" target="_blank" rel="noopener">${escapeHtml(d.short)}</a>
+        · ${d.clauses} пунктов${d.include_chapters.length ? ` (главы ${d.include_chapters.join(", ")})` : ""}
+        · текст с изменениями по ${escapeHtml(d.latest_amendment || "—")}</div>`).join("");
+    $("docs").innerHTML = s.documents.map((d) =>
+      `<label class="chip"><input type="checkbox" name="doc" value="${escapeHtml(d.code)}" checked>${escapeHtml(d.short.replace(/^.*\((.*)\)$/, "$1"))}</label>`).join("");
+  } catch (e) {
+    $("sub").innerHTML = `<span class="error">Индекс недоступен: ${escapeHtml(e.message)}</span>`;
+  }
+}
+
+function renderHit(h, i, lexQuery) {
+  const f = h.features;
+  const ranks = [
+    h.reranked ? `до cross-encoder #${h.retrieval_rank}` : null,
+    f ? `cos ${f.cos.toFixed(3)} · BM25 ${f.bm25.toFixed(2)}` : null,
+    h.dense_rank ? `смысл #${h.dense_rank} (${h.dense_score})` : "смысл —",
+    h.bm25_rank ? `BM25 #${h.bm25_rank} (${h.bm25_score})` : "BM25 —",
+  ].filter(Boolean).join(" · ");
+  const scoreLabel = h.reranked ? `соответствие ${h.score.toFixed(3)}` : f ? `LambdaMART ${h.score.toFixed(3)}` : `оценка ${h.score.toFixed(4)}`;
+  const also = h.also_matched && h.also_matched.length ? ` · также совпали: ${h.also_matched.map(escapeHtml).join(", ")}` : "";
+  const notes = (h.notes || "").trim();
+  const el = document.createElement("article");
+  el.className = "panel hit";
+  el.innerHTML = `
+    <div class="hit-head">
+      <span class="rank">${i + 1}.</span>
+      <span class="label">${escapeHtml(h.clause_label)}</span>
+      <span class="act">${escapeHtml(h.doc_short)}</span>
+      <span class="badge b-${h.status}">${STATUS[h.status] || h.status}</span>
+    </div>
+    <div class="crumbs">${escapeHtml([h.chapter, h.section].filter(Boolean).join(" › "))}</div>
+    <div class="scores">${scoreLabel} · ${ranks}${also}</div>
+    <div class="text">${highlight(h.text, lexQuery)}</div>
+    ${h.amended_by ? `<div class="crumbs">Изменения: ${escapeHtml(h.amended_by)}</div>` : ""}
+    ${notes ? `<details class="notes"><summary>Сноски и примечания</summary>${notes.split("\n").map((n) => `<p>${escapeHtml(n)}</p>`).join("")}</details>` : ""}
+    <div class="actions" style="margin-top:10px">
+      <a href="${escapeHtml(h.url)}" target="_blank" rel="noopener">Открыть на adilet</a>
+      <button type="button" data-act="quote">Копировать цитату</button>
+      <button type="button" data-act="yaml">Для rules.yaml</button>
+      <button type="button" data-act="ctx">Соседние пункты</button>
+    </div>
+    <div class="extra"></div>`;
+  const extra = el.querySelector(".extra");
+  el.querySelector('[data-act="quote"]').onclick = () => copy(`${h.text}\n(${h.doc_short}, ${h.clause_label})`, "Цитата");
+  el.querySelector('[data-act="yaml"]').onclick = () => {
+    copy(h.citation_yaml, "Блок citations");
+    extra.innerHTML = `<pre class="yaml">${escapeHtml(h.citation_yaml)}</pre>`;
+  };
+  el.querySelector('[data-act="ctx"]').onclick = async (ev) => {
+    ev.target.disabled = true;
+    try {
+      const c = await api(`/api/regs/chunk/${encodeURIComponent(h.id)}?before=1&after=1`);
+      extra.innerHTML = `<div class="context">${c.context.map((r) =>
+        `<div class="ctx ${r.clause === h.clause ? "cur" : ""}"><b>${escapeHtml(r.clause_label)}</b> · ${STATUS[r.status] || r.status}\n${escapeHtml(r.text)}</div>`).join("")}</div>`;
+    } catch (e) {
+      extra.innerHTML = `<p class="error">${escapeHtml(e.message)}</p>`;
+    } finally { ev.target.disabled = false; }
+  };
+  return el;
+}
+
+async function runSearch(ev) {
+  if (ev) ev.preventDefault();
+  const q = $("q").value.trim();
+  if (q.length < 2) return;
+  const params = new URLSearchParams({
+    q, k: $("k").value, mode: document.querySelector('input[name="mode"]:checked').value,
+    glossary: $("glossary").checked, rerank: $("rerank").checked, include_repealed: $("repealed").checked,
+  });
+  const docs = [...document.querySelectorAll('input[name="doc"]')];
+  const picked = docs.filter((d) => d.checked).map((d) => d.value);
+  if (docs.length && picked.length === 0) { $("status").innerHTML = '<span class="error">Выберите хотя бы один акт.</span>'; return; }
+  if (picked.length < docs.length) picked.forEach((d) => params.append("doc", d));
+  $("go").disabled = true;
+  $("status").textContent = "Поиск…";
+  try {
+    const r = await api(`/api/regs/search?${params}`);
+    const added = r.glossary_added.length ? ` · глоссарий добавил: «${r.glossary_added.map(escapeHtml).join("», «")}»` : "";
+    const rr = r.reranker ? ` · cross-encoder ${escapeHtml(r.reranker.split("/").pop())} по ${r.rerank_candidates} пунктам за ${r.rerank_ms} мс` : "";
+    $("status").innerHTML = `${r.hits.length} результатов · ${r.mode}${rr} · всего ${r.took_ms} мс${added}<br>BM25-термины: <code>${escapeHtml(r.lex_query)}</code>`;
+    const list = $("results"); list.innerHTML = "";
+    if (!r.hits.length) list.innerHTML = '<p class="status">Ничего не найдено. Попробуйте другой режим или переформулируйте запрос.</p>';
+    r.hits.forEach((h, i) => list.appendChild(renderHit(h, i, r.lex_query)));
+    history.replaceState(null, "", `?q=${encodeURIComponent(q)}`);
+  } catch (e) {
+    $("status").innerHTML = `<span class="error">Ошибка: ${escapeHtml(e.message)}</span>`;
+  } finally { $("go").disabled = false; }
+}
+
+$("form").addEventListener("submit", runSearch);
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) runSearch(e); });
+$("apikey").value = store("regs_api_key") || "";
+$("apikey").addEventListener("change", (e) => { store("regs_api_key", e.target.value.trim()); loadStats(); });
+EXAMPLES.forEach((ex) => {
+  const b = document.createElement("button"); b.type = "button"; b.textContent = ex;
+  b.onclick = () => { $("q").value = ex; runSearch(); };
+  $("examples").appendChild(b);
+});
+loadStats().then(() => {
+  const q = new URLSearchParams(location.search).get("q");
+  if (q) { $("q").value = q; runSearch(); }
+});
+</script>
+</body>
+</html>

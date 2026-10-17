@@ -1,0 +1,63 @@
+# Corpus manifest: which acts are indexed and where their text comes from.
+#
+# canonical_url is what citations point to (adilet.zan.kz, FAQ 30). Chunk URLs add the clause
+# anchor (#zNN), which is the same on adilet and on the mirror.
+# fetch_url is where the HTML is downloaded from. adilet.zan.kz is now a JavaScript app whose
+# document API needs a key, so we fetch the same act, under the same code, from the
+# zakon.uchet.kz mirror, which keeps adilet's HTML and anchors. Check the edition on adilet before
+# a quote goes into rules.yaml; the UI shows the latest amendment found in each text.
+# include_chapters (optional) limits indexing to the listed chapter numbers.
+version: 1
+documents:
+  - code: V1900019680
+    short: "Правила кассовых операций и инкассации (НБРК № 231)"
+    title: >-
+      Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей
+      в банках второго уровня, филиалах банков-нерезидентов Республики Казахстан, Национальном
+      операторе почты и юридических лицах, исключительной деятельностью которых является инкассация
+      банкнот, монет и ценностей
+    act: "Постановление Правления Национального Банка Республики Казахстан от 29 ноября 2019 года № 231"
+    canonical_url: https://adilet.zan.kz/rus/docs/V1900019680
+    fetch_url: https://zakon.uchet.kz/rus/docs/V1900019680
+    role: >-
+      Main source. How a cashier accepts, counts, issues and stores cash, and how cash collectors
+      hand over bags. Most visually checkable rules are here.
+
+  - code: V2000020075
+    short: "Правила охраны и устройства помещений (НБРК № 14)"
+    title: >-
+      Правила организации охраны и устройства помещений банков второго уровня, филиалов
+      банков-нерезидентов Республики Казахстан, Национального оператора почты, юридических лиц,
+      исключительной деятельностью которых является инкассация банкнот, монет и ценностей, и
+      юридических лиц, осуществляющих деятельность исключительно через обменные пункты на основании
+      лицензии Национального Банка Республики Казахстан на обменные операции с наличной иностранной
+      валютой
+    act: "Постановление Правления Национального Банка Республики Казахстан от 24 февраля 2020 года № 14"
+    canonical_url: https://adilet.zan.kz/rus/docs/V2000020075
+    fetch_url: https://zakon.uchet.kz/rus/docs/V2000020075
+    role: >-
+      Cash premises: an isolated cash unit, a lockable door for each cash room, partitions, video
+      cameras, and loading areas for collection hidden from third parties. Rule 231 p. 5 points here.
+
+  - code: V1700016120
+    short: "Правила определения платежности банкнот и монет (НБРК № 230)"
+    title: "Правила определения платежности банкнот и монет национальной валюты Республики Казахстан"
+    act: "Постановление Правления Национального Банка Республики Казахстан от 29 ноября 2017 года № 230"
+    canonical_url: https://adilet.zan.kz/rus/docs/V1700016120
+    fetch_url: https://zakon.uchet.kz/rus/docs/V1700016120
+    role: >-
+      What "checking payability and authenticity" means (Rule 231 pp. 19, 36, 57). Supports the
+      "cash taken without an authenticity check" type; the check itself is only partly visible.
+
+  - code: V1900018545
+    short: "Правила обменных операций с наличной иностранной валютой (НБРК № 49)"
+    title: "Правила осуществления обменных операций с наличной иностранной валютой в Республике Казахстан"
+    act: "Постановление Правления Национального Банка Республики Казахстан от 4 апреля 2019 года № 49"
+    canonical_url: https://adilet.zan.kz/rus/docs/V1900018545
+    fetch_url: https://zakon.uchet.kz/rus/docs/V1900018545
+    # 1 general provisions, 5 requirements for exchange operations, 6 how exchange points work.
+    # Chapters 2-4 and 7-9 cover licensing, reporting and gold and add only noise.
+    include_chapters: ["1", "5", "6"]
+    role: >-
+      Exchange desks inside banks: no outsiders in the operational cash room, and money unrelated
+      to the business kept outside it (p. 41). Rule 231 p. 58 points here.

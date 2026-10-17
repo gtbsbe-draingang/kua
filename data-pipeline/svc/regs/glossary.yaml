@@ -1,0 +1,29 @@
+# Everyday words from video descriptions -> the wording the acts use.
+# Video observations say "кассир", "телефон", "посторонний"; the acts say "кассовый работник",
+# "средства связи", "третьи лица". BM25 only matches shared words, so when a query word starts
+# with one of the `when` prefixes, the `add` words are appended to the BM25 query.
+# The dense (bge-m3) query is not changed. Prefixes are lowercase, with ё written as е.
+# Add a term here when a real observation fails to find its clause; keep each entry about word
+# meaning, never about one particular video.
+version: 1
+terms:
+  - when: [кассир, cashier, teller]
+    add: "кассовый работник"
+  - when: [смартфон, телефон, мобильн, гаджет, phone, smartphone, mobile]
+    add: "средства связи функции фото и видео фиксации"
+  - when: [посторонн, чужой, чужие, unauthori, stranger, outsider]
+    add: "посторонние лица третьи лица доступ"
+  - when: [инкассатор, collector]
+    add: "работник подразделения инкассации инкассатор-сборщик"
+  - when: [детектор, detector, counterfeit, подделк, фальшив, fake]
+    add: "проверка подлинности платежности защитные признаки"
+  - when: [ящик, drawer, тумб]
+    add: "специальные устройства закрывающиеся на ключ металлический шкаф сейф ящики стола"
+  - when: [уходит, уход, отходит, отошел, отлуча, leave, leaves, walks, away]
+    add: "покидать рабочее место"
+  - when: [кошел, сумочк, wallet, handbag, personal]
+    add: "личные вещи работников"
+  - when: [на виду, обзор, view, watched, publicly]
+    add: "просмотр третьими лицами"
+  - when: [хранилищ, vault]
+    add: "кладовая сейфовая комната"
