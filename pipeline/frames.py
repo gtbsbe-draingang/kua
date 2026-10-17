@@ -211,15 +211,29 @@ def normalize(path, out_path: str, timeout: float = 180.0) -> str:
     return str(out_path)
 
 
-def cut_window(path, start: float, end: float, out_path: str) -> str:
-    """Re-encode [start, end] (clamped to [0, duration]) to out_path as an upright clip (video_encoder())."""
+def _crop_filter(crop: tuple[int, int, int, int], long_side: int) -> str:
+    """`crop=w:h:x:y,scale=W:H` for a crop box (x0, y0, x1, y1): the longer side becomes long_side, both even."""
+    x0, y0, x1, y1 = crop
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0:
+        raise VideoError(f"empty crop box {crop}")
+    k = long_side / max(w, h)
+    sw, sh = (long_side, max(2 * round(h * k / 2), 2)) if w >= h else (max(2 * round(w * k / 2), 2), long_side)
+    return f"crop={w}:{h}:{x0}:{y0},scale={sw}:{sh}"
+
+
+def cut_window(path, start: float, end: float, out_path: str,
+               crop: tuple[int, int, int, int] | None = None, long_side: int = 896) -> str:
+    """Re-encode [start, end] (clamped to [0, duration]) to out_path as an upright clip (video_encoder()).
+    With crop (x0, y0, x1, y1) in upright pixels, the clip is cropped to it and scaled to long_side."""
     dur, _, _, _ = probe(path)
     start = max(float(start), 0.0)
     end = min(float(end), dur)
     if end - start <= 0.01:
         raise VideoError(f"empty window [{start:.2f}, {end:.2f}] in a {dur:.2f}s video")
+    vf = ["-vf", _crop_filter(crop, long_side)] if crop else []
     cmd = [ffmpeg_bin(), "-nostdin", "-y", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", str(path),
-           "-t", f"{end - start:.3f}", "-an", *_encoder_args(video_encoder(), 20),
+           "-t", f"{end - start:.3f}", "-an", *vf, *_encoder_args(video_encoder(), 20),
            "-movflags", "+faststart", str(out_path)]
     _ffmpeg(cmd, out_path, timeout=60)
     return out_path

@@ -15,7 +15,7 @@
 #   main       env/main: API + VideoJev-4B (torch 2.8.0+cu128, transformers 5.14.1)
 #   iv3        env/iv3: InternVideo3-8B server (torch 2.8.0+cu128, transformers 4.57.3)
 #   vlm        env/vlm: SGLang for the Qwen3.5-9B judge (CUDA 12 build, see below)
-#   weights    hf download of the three models into HF_HOME, then a shard check
+#   weights    hf download of the four models into HF_HOME, then a shard check
 #
 # vlm's architecture check needs the weights; it is deferred (logged) until they
 # exist, and the weights target runs it once env/vlm exists.
@@ -107,6 +107,7 @@ MODELS=(
   "ZhuYuhan/VideoJev-4B"
   "yanziang/InternVideo3-8B-Instruct|.claude/*|__pycache__/*"
   "Qwen/Qwen3.5-9B"
+  "PekingU/rtdetr_r50vd_coco_o365"
 )
 
 log() { printf '[%s] %s\n' "$(date -u '+%F %T')" "$*"; }
@@ -340,7 +341,7 @@ sys.exit(0 if set(archs) <= set(names) else "sglang has no model class for this 
 PY
 }
 
-# Download the three models into HF_HOME (resumable), then check every shard
+# Download the four models into HF_HOME (resumable), then check every shard
 # against its index: each tensor the index names must sit in the shard it names.
 build_weights() {
   local spec repo pats args
@@ -367,7 +368,13 @@ base = Path(sys.argv[1])
 ref = (base / "refs" / "main").read_text().strip()
 snap = base / "snapshots" / ref
 incomplete = list((base / "blobs").glob("*.incomplete"))
-index = json.loads((snap / "model.safetensors.index.json").read_text())["weight_map"]
+idx = snap / "model.safetensors.index.json"
+if idx.exists():
+    index = json.loads(idx.read_text())["weight_map"]
+else:  # a single-file checkpoint (the person detector): its one file holds every tensor
+    with open(snap / "model.safetensors", "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        index = {k: "model.safetensors" for k in json.loads(f.read(n)) if k != "__metadata__"}
 found = {}
 for shard in sorted(set(index.values())):
     with open(snap / shard, "rb") as f:

@@ -188,3 +188,21 @@ def test_encoder_probe_runs_a_real_encode():
     usable = frames._usable_encoders("ffmpeg")
     assert "mpeg4" in usable
     assert frames._usable_encoders("/nonexistent/ffmpeg") == frozenset()
+
+
+def test_cut_window_crop_landscape(landscape_clip, tmp_path):
+    from pipeline.frames import cut_window
+    out = cut_window(landscape_clip, 0, 1, str(tmp_path / "z.mp4"), crop=(400, 100, 1400, 1000))
+    _, _, w, h = probe(out)
+    assert (w, h) == (896, 806)
+
+
+def test_cut_window_no_crop_unchanged(landscape_clip, tmp_path, monkeypatch):
+    from pipeline import frames
+    cmds = []
+    real = frames._ffmpeg
+    monkeypatch.setattr(frames, "_ffmpeg", lambda cmd, out, timeout: (cmds.append(cmd), real(cmd, out, timeout))[1])
+    out = frames.cut_window(landscape_clip, 0, 1, str(tmp_path / "n.mp4"))
+    _, _, w, h = probe(out)
+    assert (w, h) == (1920, 1080)
+    assert "-vf" not in cmds[0] and "-filter:v" not in cmds[0]
