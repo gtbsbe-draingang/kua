@@ -144,3 +144,47 @@ def test_normalize_garbage_and_failure_cleanup(rotated_clip, tmp_path, monkeypat
     with pytest.raises(VideoError, match="boom"):
         frames.normalize(rotated_clip, str(out))
     assert not out.exists() and "-nostdin" in calls[0]
+
+
+def _decode_all(path):
+    with av.open(str(path)) as c:
+        return sum(1 for _ in c.decode(c.streams.video[0]))
+
+
+def test_mpeg4_encoder_override_gives_decodable_outputs(portrait_clip, rotated_clip, tmp_path, monkeypatch):
+    from pipeline import frames
+    monkeypatch.setenv("VIDEO_ENCODER", "mpeg4")
+    assert frames.video_encoder() == "mpeg4"
+    w = frames.cut_window(portrait_clip, 1, 3, str(tmp_path / "w.mp4"))
+    dur, _, width, height = probe(w)
+    assert abs(dur - 2.0) <= 0.1 and (width, height) == (464, 848) and _coded(w)[0] == "mpeg4"
+    assert abs(_decode_all(w) - 60) <= 3
+    n = frames.normalize(rotated_clip, str(tmp_path / "n.mp4"))
+    assert _coded(n) == ("mpeg4", 848, 464, 0) and abs(probe(n)[0] - 6.0) <= 0.1
+    assert abs(_decode_all(n) - 180) <= 3
+    mp4v = tmp_path / "mp4v.mov"  # already the encoder's codec, upright, at t=0: used as is
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30",
+                    "-t", "1", "-c:v", "mpeg4", str(mp4v)], check=True)
+    assert frames.normalize(mp4v, str(tmp_path / "n2.mp4")) == str(mp4v)
+
+
+def test_encoder_detection_prefers_x264_then_openh264_then_mpeg4(monkeypatch):
+    from pipeline import frames
+    monkeypatch.delenv("VIDEO_ENCODER", raising=False)
+    monkeypatch.setattr(frames, "_usable_encoders", lambda ffmpeg: frozenset({"libopenh264", "mpeg4"}))
+    assert frames.video_encoder() == "libopenh264"
+    monkeypatch.setattr(frames, "_usable_encoders", lambda ffmpeg: frozenset())
+    assert frames.video_encoder() == "mpeg4"  # native, always there
+    monkeypatch.setattr(frames, "_usable_encoders", lambda ffmpeg: frozenset({"libx264", "mpeg4"}))
+    assert frames.video_encoder() == "libx264"
+    monkeypatch.setenv("VIDEO_ENCODER", "nonsense")
+    with pytest.raises(VideoError, match="VIDEO_ENCODER"):
+        frames.video_encoder()
+
+
+def test_encoder_probe_runs_a_real_encode():
+    from pipeline import frames
+    frames._usable_encoders.cache_clear()
+    usable = frames._usable_encoders("ffmpeg")
+    assert "mpeg4" in usable
+    assert frames._usable_encoders("/nonexistent/ffmpeg") == frozenset()

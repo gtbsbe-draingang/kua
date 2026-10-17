@@ -150,3 +150,12 @@ def test_pair_timeline_even_and_odd():
     assert times == [0.25, 1.0] and bounds == [(0.0, 0.75), (0.75, 1.5)]
     with pytest.raises(ValueError):
         pair_timeline([], 1.0)
+
+
+def test_merge_events_indexed_links_each_output_to_its_source():
+    from pipeline.logic import merge_events_indexed
+    evs = [_ev("r", 10.0, 0.5), _ev("x", 11.0, kept=False), _ev("r", 12.0, 0.9), _ev("r", 20.0, 0.4)]
+    out = merge_events_indexed(evs, 3.0)
+    assert [(e.rule_id, e.timecode, i) for e, i in out] == [("x", 11.0, 1), ("r", 12.0, 2), ("r", 20.0, 3)]
+    assert (out[1][0].t_start, out[1][0].t_end) == (9.0, 13.0)
+    assert [e for e, _ in out] == merge_events(evs, 3.0)

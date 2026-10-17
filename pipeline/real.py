@@ -20,14 +20,16 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from pipeline import clients, frames, videojev
-from pipeline.logic import (accept_judge, judge_candidates, keep_decision, merge_events, pair_timeline,
-                            pick_timecode, sample_times, segments, top_candidates)
+from pipeline.logic import (accept_judge, judge_candidates, keep_decision, merge_events_indexed,
+                            pair_timeline, pick_timecode, sample_times, segments, top_candidates)
 from pipeline.types import Event, Frame, PipelineResult
 from rules import load_rules
 
@@ -39,18 +41,45 @@ WINDOW_PAD_SEC = 2.0
 POOL_SIZE = 6
 VERIFY_MAX_SEC, VERIFY_RESERVE_SEC, VERIFY_MIN_SEC = 60.0, 20.0, 5.0
 JUDGE_MAX_SEC, JUDGE_RESERVE_SEC, JUDGE_MIN_SEC = 30.0, 10.0, 3.0
-CHOOSE_MIN_LEFT_SEC = 30.0  # below this, type choices are skipped so the check and the frames still fit
+# A type choice may wait for the model until this much time is left, so the check and the frames still fit.
+CHOOSE_MIN_LEFT_SEC = 30.0
+# Grounding may wait for the model (another job's call) until this much time is left: grounding itself (about
+# 15-30 s on the longest training clip) plus windows, frames and the result must still fit before the deadline.
+GROUND_START_RESERVE_SEC = 45.0
+# Windows are cut only while at least one of their users (the check or a type choice) can still run.
+WINDOWS_MIN_LEFT_SEC = min(VERIFY_MIN_SEC + VERIFY_RESERVE_SEC, CHOOSE_MIN_LEFT_SEC)
+# The upright copy may take up to NORMALIZE_MAX_SEC, but never past GROUND_START_RESERVE_SEC before the
+# deadline; it always gets NORMALIZE_MIN_SEC, and on failure the original file is used.
+NORMALIZE_MAX_SEC, NORMALIZE_MIN_SEC = 120.0, 5.0
 TH_KEYS = ("cand", "verify", "strong", "fallback", "top_k", "merge_sec", "anchor", "anchor_offset_sec")
 
 
+class DeadlineExceeded(RuntimeError):
+    """The job cannot produce a result before its deadline."""
+
+
 # ---- the model calls (mocked in tests) -----------------------------------------------------------
+# They keep design.md's signatures. How long ground/choose may wait for the shared VideoJev model (another
+# job may be using it) is set by _run through model_wait(), so a two-argument mock still fits.
+
+_MODEL_WAIT: ContextVar[float | None] = ContextVar("model_wait", default=None)
+
+
+@contextmanager
+def model_wait(seconds: float | None):
+    token = _MODEL_WAIT.set(seconds)
+    try:
+        yield
+    finally:
+        _MODEL_WAIT.reset(token)
+
 
 def ground(video_path: str, queries: list[str]) -> dict[str, list[float]]:
-    return videojev.get().ground(video_path, queries)
+    return videojev.get().ground(video_path, queries, timeout=_MODEL_WAIT.get())
 
 
 def choose(window_path: str, options: list[str]) -> dict[str, float]:
-    return videojev.get().choose(window_path, options)
+    return videojev.get().choose(window_path, options, timeout=_MODEL_WAIT.get())
 
 
 def verify(window_path: str, rules: list[dict], timeout: float) -> tuple[float | None, str, str]:
@@ -137,6 +166,7 @@ def _config() -> _Config:
 def warmup() -> None:
     """Load the rules, the thresholds and VideoJev now (at server start), not on the first job."""
     _config()
+    log.info("video encoder for internal copies: %s", frames.video_encoder())
     videojev.get().load()
 
 
@@ -238,30 +268,47 @@ def _judge_candidate(rule: dict) -> dict:
                            "quote": c.get("quote", "")} for c in rule.get("citations") or []]}
 
 
-def _best_type(ev: Event) -> str:
+def _best_type(type_probs: dict[str, float], grounded: str) -> str:
     """VideoJev's most likely rule; the grounded rule when there are no choices or on a tie."""
-    probs = {k: v for k, v in ev.type_probs.items() if k != "none"}
+    probs = {k: v for k, v in type_probs.items() if k != "none"}
     if not probs:
-        return ev.rule_id
-    return max(probs, key=lambda r: (probs[r], r == ev.rule_id))
+        return grounded
+    return max(probs, key=lambda r: (probs[r], r == grounded))
 
 
 def _evidence(src: str, ev: Event) -> list[Frame]:
+    """1-3 frames for a kept event. If those fail, one frame at the timecode, then at the segment start, the
+    segment end and the clip start. A kept event is never dropped for want of a frame (recall first); it is
+    left without one only if no frame of the clip decodes at all."""
     try:
         return frames.evidence(src, ev.timecode, ev.t_start, ev.t_end)
     except frames.VideoError as e:
         log.warning("evidence frames failed at %.2f s: %s", ev.timecode, e)
-    try:
-        return [frames.jpeg_at(src, ev.timecode)]
-    except frames.VideoError as e:
-        log.warning("no evidence frame at %.2f s: %s", ev.timecode, e)
-        return []
+    for t in (ev.timecode, ev.t_start, ev.t_end, 0.0):
+        try:
+            return [frames.jpeg_at(src, t)]
+        except frames.VideoError as e:
+            log.warning("no frame at %.2f s: %s", t, e)
+    log.error("kept event at %.2f s has no evidence frame", ev.timecode)
+    return []
+
+
+def _work_dir(video_path: str) -> tuple[str, str | None]:
+    """A fresh folder for the job's windows and upright copy: under the temp folder the environment names
+    (env.sh points TMPDIR inside the root on the pod); without one, under a work/ folder next to the input,
+    never the system /tmp. Returns the folder and the work/ folder if this call created it."""
+    if any(os.environ.get(k) for k in ("TMPDIR", "TEMP", "TMP")):
+        return tempfile.mkdtemp(prefix="review-"), None
+    parent = Path(video_path).resolve().parent / "work"
+    made = None if parent.is_dir() else str(parent)
+    parent.mkdir(exist_ok=True)
+    return tempfile.mkdtemp(prefix="review-", dir=parent), made
 
 
 def analyze(video_path, deadline: float, on_stage: Callable[[str], None]) -> PipelineResult:
-    """Review one video. deadline is a time.time() value; work files live in a temporary folder."""
+    """Review one video. deadline is a time.time() value; work files live in a folder removed afterwards."""
     cfg = _config()
-    work = tempfile.mkdtemp(prefix="review-")
+    work, made = _work_dir(str(video_path))
     pools: list[ThreadPoolExecutor] = []
     try:
         return _run(str(video_path), deadline, on_stage, cfg, work, pools)
@@ -270,6 +317,11 @@ def analyze(video_path, deadline: float, on_stage: Callable[[str], None]) -> Pip
             p.shutdown(wait=False, cancel_futures=True)
         if os.environ.get("PIPELINE_KEEP_WORK") != "1":
             shutil.rmtree(work, ignore_errors=True)
+            if made:
+                try:
+                    os.rmdir(made)  # only the work/ folder this job created, and only when empty
+                except OSError:
+                    pass
 
 
 def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
@@ -281,17 +333,31 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     def lap(name: str, t0: float) -> None:
         timings[name] = round(time.monotonic() - t0, 3)
 
-    # 1. decoding: one upright H.264 copy when the input needs it; every later step reads src
+    # 1. decoding: one upright copy when the input needs it; every later step reads src
     on_stage("decoding")
     t0 = time.monotonic()
-    src = frames.normalize(video_path, os.path.join(work, "norm.mp4"))
-    duration = frames.probe(src)[0]
+    nt = max(NORMALIZE_MIN_SEC, min(NORMALIZE_MAX_SEC, _left(deadline) - GROUND_START_RESERVE_SEC))
+    try:
+        src = frames.normalize(video_path, os.path.join(work, "norm.mp4"), timeout=nt)
+    except frames.VideoError as e:
+        log.warning("upright copy failed (%s); using the original file", e)
+        src = video_path
+    duration = frames.probe(src)[0]  # an unreadable input fails the job here
     lap("decoding", t0)
 
     # 2. grounding: one VideoJev pass with every query; candidates over all rules
     on_stage("grounding")
     t0 = time.monotonic()
-    curves = ground(src, cfg.queries)
+    gt = max(0.0, _left(deadline) - GROUND_START_RESERVE_SEC)
+    try:
+        with model_wait(gt):
+            curves = ground(src, cfg.queries)
+    except videojev.ModelBusy as e:
+        raise DeadlineExceeded(f"VideoJev stayed busy with other jobs, so grounding could not start at least "
+                               f"{GROUND_START_RESERVE_SEC:.0f} s before the deadline") from e
+    if _left(deadline) - VERIFY_RESERVE_SEC < VERIFY_MIN_SEC:
+        log.warning("grounding finished %.1f s before the deadline: too late for the check step; "
+                    "events are kept on grounding scores alone", _left(deadline))
     rule_curves, n = _rule_curves(curves, cfg)
     cands: list[_Cand] = []
     if n:
@@ -304,7 +370,7 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     pool = ThreadPoolExecutor(max_workers=POOL_SIZE, thread_name_prefix="review")
     pools.append(pool)
     t0 = time.monotonic()
-    if cands and _left(deadline) >= min(VERIFY_MIN_SEC + VERIFY_RESERVE_SEC, CHOOSE_MIN_LEFT_SEC):
+    if cands and _left(deadline) >= WINDOWS_MIN_LEFT_SEC:
         def cut(k: int) -> str | None:
             c = cands[k]
             try:
@@ -328,11 +394,19 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
                    for k, c in enumerate(cands) if c.window}
     t1 = time.monotonic()
     for c in cands:
-        if c.window is None or _left(deadline) < CHOOSE_MIN_LEFT_SEC:
+        if c.window is None:
             continue
+        budget = _left(deadline) - CHOOSE_MIN_LEFT_SEC  # how long this choice may wait for the model
+        if budget <= 0:
+            break
         try:
-            probs = choose(c.window, cfg.options)
-            c.type_probs = {rid: _clean(probs.get(opt)) for opt, rid in zip(cfg.options, cfg.option_ids, strict=True)}
+            with model_wait(budget):
+                probs = choose(c.window, cfg.options)
+            c.type_probs = {rid: _clean(probs.get(opt))
+                            for opt, rid in zip(cfg.options, cfg.option_ids, strict=True)}
+        except videojev.ModelBusy as e:
+            log.warning("type choices skipped: %s", e)
+            break
         except Exception as e:
             log.warning("type choice failed: %s: %s", type(e).__name__, e)
     lap("choosing", t1)
@@ -347,17 +421,18 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
                 log.warning("verify failed: %s", type(e).__name__)
     lap("verifying", t0)
 
-    # 4. keep or drop every candidate; rejected ones stay in the result for the threshold sweep
-    events, vtypes = [], {}
+    # 4. keep or drop every candidate (rejected ones stay in the result for the threshold sweep). A kept
+    # event takes VideoJev's best type BEFORE merging, so same-type events within merge_sec become one.
+    events = []
     for c in cands:
         kept, reason = keep_decision(c.score, c.p_yes, c.p_yes is not None, th)
-        ev = Event(rule_id=c.rule_id, t_start=c.t_start, t_end=c.t_end, timecode=c.timecode,
-                   ground_score=c.score, type_probs=c.type_probs, verify_score=c.p_yes, kept=kept,
-                   reason=reason, observation=c.observation)
-        vtypes.setdefault((ev.rule_id, ev.timecode, ev.ground_score), c.vtype)
-        events.append(ev)
-    events = merge_events(events, float(th["merge_sec"]))
-    kept_evs = [(ev, vtypes.get((ev.rule_id, ev.timecode, ev.ground_score), "")) for ev in events if ev.kept]
+        events.append(Event(rule_id=_best_type(c.type_probs, c.rule_id) if kept else c.rule_id,
+                            t_start=c.t_start, t_end=c.t_end, timecode=c.timecode, ground_score=c.score,
+                            type_probs=c.type_probs, verify_score=c.p_yes, kept=kept, reason=reason,
+                            observation=c.observation))
+    merged = merge_events_indexed(events, float(th["merge_sec"]))
+    events = [ev for ev, _ in merged]
+    kept_evs = [(ev, cands[i]) for ev, i in merged if ev.kept]  # each with its best member's candidate
 
     # 5. writing: evidence frames first (the judge looks at them), then type and justification
     on_stage("writing")
@@ -369,10 +444,8 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
     lap("evidence", t0)
 
     t1 = time.monotonic()
-    cand_ids = []
-    for ev, vtype in kept_evs:
-        probs = ev.type_probs or {ev.rule_id: 1.0}
-        cand_ids.append(judge_candidates(probs, vtype if vtype in cfg.detectable else ""))
+    cand_ids = [judge_candidates(ev.type_probs or {c.rule_id: 1.0}, c.vtype if c.vtype in cfg.detectable else "")
+                for ev, c in kept_evs]
     answers: dict[int, tuple] = {}
     jt = min(JUDGE_MAX_SEC, _left(deadline) - JUDGE_RESERVE_SEC)
     if kept_evs and jt >= JUDGE_MIN_SEC:
@@ -389,13 +462,11 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
                 except Exception as e:
                     log.warning("judge failed: %s", type(e).__name__)
     for i, (ev, _) in enumerate(kept_evs):
-        best = _best_type(ev)
         rid, just, _conf = answers.get(i, (None, "", None))
         if accept_judge(rid, cand_ids[i]) and just:
             ev.type_source, ev.judge_rule_id, ev.justification = "judge", rid, just
         else:
-            ev.type_source, ev.judge_rule_id, ev.justification = "fallback", None, cfg.rules[best]["why"]
-        ev.rule_id = best
+            ev.type_source, ev.judge_rule_id, ev.justification = "fallback", None, cfg.rules[ev.rule_id]["why"]
     lap("judging", t1)
     lap("writing", t0)
 
@@ -408,6 +479,7 @@ def _run(video_path: str, deadline: float, on_stage, cfg: _Config, work: str,
         "verifier": f"{clients.IV3_MODEL} at {os.environ.get('IV3_URL', clients.IV3_URL)}",
         "judge": (f"{os.environ.get('JUDGE_MODEL', clients.JUDGE_MODEL)} at "
                   f"{os.environ.get('JUDGE_URL', clients.JUDGE_URL)}") if clients.judge_enabled() else "off",
+        "encoder": frames.video_encoder(),
         "rules": cfg.rules_version,
         "thresholds": json.dumps(th, sort_keys=True),
     }

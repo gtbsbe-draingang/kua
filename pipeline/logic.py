@@ -57,28 +57,35 @@ def keep_decision(ground: float, verify: float | None, vlm_ok: bool, th: dict) -
 
 def merge_events(events: list[Event], merge_sec: float) -> list[Event]:
     """Chain-merge kept events of the same rule whose timecodes are within merge_sec."""
-    passthrough = [e for e in events if not e.kept]
-    by_rule: dict[str, list[Event]] = {}
-    for e in events:
+    return [e for e, _ in merge_events_indexed(events, merge_sec)]
+
+
+def merge_events_indexed(events: list[Event], merge_sec: float) -> list[tuple[Event, int]]:
+    """merge_events, with the index of the input event each output event copies: a merged group's
+    highest-scoring member, or the (rejected) event itself."""
+    passthrough = [(e, i) for i, e in enumerate(events) if not e.kept]
+    by_rule: dict[str, list[int]] = {}
+    for i, e in enumerate(events):
         if e.kept:
-            by_rule.setdefault(e.rule_id, []).append(e)
-    merged: list[Event] = []
-    for evs in by_rule.values():
-        evs = sorted(evs, key=lambda e: e.timecode)
-        group = [evs[0]]
-        for e in evs[1:]:
-            if e.timecode - group[-1].timecode <= merge_sec:
-                group.append(e)
+            by_rule.setdefault(e.rule_id, []).append(i)
+    merged: list[tuple[Event, int]] = []
+    for idx in by_rule.values():
+        idx = sorted(idx, key=lambda i: events[i].timecode)
+        group = [idx[0]]
+        for i in idx[1:]:
+            if events[i].timecode - events[group[-1]].timecode <= merge_sec:
+                group.append(i)
             else:
-                merged.append(_collapse(group))
-                group = [e]
-        merged.append(_collapse(group))
-    return sorted(passthrough + merged, key=lambda e: e.timecode)
+                merged.append(_collapse(events, group))
+                group = [i]
+        merged.append(_collapse(events, group))
+    return sorted(passthrough + merged, key=lambda x: x[0].timecode)
 
 
-def _collapse(group: list[Event]) -> Event:
-    best = max(group, key=lambda e: e.ground_score)
-    return replace(best, t_start=min(e.t_start for e in group), t_end=max(e.t_end for e in group))
+def _collapse(events: list[Event], group: list[int]) -> tuple[Event, int]:
+    best = max(group, key=lambda i: events[i].ground_score)
+    return replace(events[best], t_start=min(events[i].t_start for i in group),
+                   t_end=max(events[i].t_end for i in group)), best
 
 
 def pick_timecode(probs: list[float], step_sec: float, t_start: float, t_end: float,

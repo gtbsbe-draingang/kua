@@ -1,7 +1,9 @@
 """The real pipeline end to end with the four model calls mocked (ground, choose, verify, judge)."""
 import io
 import json
+import logging
 import os
+import threading
 import shutil
 import tempfile
 import time
@@ -13,7 +15,7 @@ import yaml
 from PIL import Image
 
 import pipeline
-from pipeline import real, videojev
+from pipeline import frames, real, videojev
 from pipeline.frames import probe
 from pipeline.videojev import Curves
 from rules import load_rules
@@ -21,7 +23,7 @@ from rules import load_rules
 ROOT = Path(__file__).resolve().parent.parent
 TH = {"cand": 0.25, "verify": 0.5, "strong": 0.8, "fallback": 0.5, "top_k": 6, "merge_sec": 3,
       "anchor": "peak", "anchor_offset_sec": 0}
-REAL_JUDGE = real.judge
+REAL_JUDGE, REAL_GROUND, REAL_CHOOSE = real.judge, real.ground, real.choose
 LOW = 0.05
 
 
@@ -36,9 +38,11 @@ class Rig:
         self.choose_error = None
         self.ground_calls, self.choose_calls, self.verify_calls, self.judge_calls = [], [], [], []
         self.ground_coded, self.choose_coded = None, []
+        self.ground_timeouts, self.choose_timeouts = [], []
 
-    def ground(self, path, queries):
+    def ground(self, path, queries):  # design.md's two-argument mock signature
         self.ground_calls.append((path, list(queries)))
+        self.ground_timeouts.append(real._MODEL_WAIT.get())
         self.ground_coded = coded(path)
         n = len(next(iter(self.curves.values()), [LOW] * 6))
         firsts = {self.rules[rid]["grounding_queries"][0]: c for rid, c in self.curves.items()}
@@ -47,6 +51,7 @@ class Rig:
 
     def choose(self, window, options):
         self.choose_calls.append((window, list(options)))
+        self.choose_timeouts.append(real._MODEL_WAIT.get())
         self.choose_coded.append(coded(window))
         if self.choose_error:
             raise self.choose_error
@@ -230,6 +235,7 @@ def test_verify_down_keeps_on_fallback_threshold(rig, clip):
     two_candidates(rig)
     rig.curves["personal_items_at_workplace"] = [LOW, LOW, LOW, LOW, 0.6, LOW]
     rig.verdicts["personal_items_at_workplace"] = (None, "", "")
+    rig.choice = {}  # no type preference: each kept event keeps its grounded rule, so the two don't merge
     res = real.analyze(clip, time.time() + 240, lambda s: None)
     assert [(e.ground_score, e.verify_score, e.reason) for e in res.events] == [
         (0.7, 0.9, "verified"), (0.6, None, "fallback_no_vlm")]
@@ -363,3 +369,153 @@ def test_result_fits_the_api_and_debug_json(rig, clip, rules):
     assert "Кассир отходит от стола." in v["description"] and "Основание:" in v["description"]
     dbg = json.loads(json.dumps(to_debug(res)))
     assert [e["kept"] for e in dbg["events"]] == [True, False]
+
+
+def test_same_best_type_merges_across_grounded_rules(rig, clip):
+    rig.curves = {"cash_unattended": [LOW, 0.6, LOW, LOW, LOW, LOW],
+                  "personal_items_at_workplace": [LOW, LOW, LOW, 0.7, LOW, LOW]}
+    rig.verdicts = {"cash_unattended": (0.9, "cash_unattended", "obs-a"),
+                    "personal_items_at_workplace": (0.9, "deposit_not_counted", "obs-b")}
+    rig.choice = {"cash_unattended": 0.7, "none": 0.3}
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    ev, = res.events  # both candidates retyped to cash_unattended, 2 s apart: one event
+    assert (ev.rule_id, ev.kept, ev.reason) == ("cash_unattended", True, "verified")
+    assert (ev.t_start, ev.t_end) == pytest.approx((0.75, 3.75))
+    assert ev.ground_score == pytest.approx(0.7) and ev.observation == "obs-b"  # the best member's check
+    assert ev.timecode == ev.evidence[0].t == pytest.approx(3.25)
+    j, = rig.judge_calls
+    assert "deposit_not_counted" in [c["id"] for c in j["candidates"]]  # the best member's TYPE
+
+
+def test_rejected_events_keep_their_grounded_rule(rig, clip):
+    two_candidates(rig)
+    rig.choice = {"previous_cash_on_desk": 0.9, "none": 0.1}
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert [(e.rule_id, e.kept) for e in res.events] == [
+        ("previous_cash_on_desk", True), ("personal_items_at_workplace", False)]
+
+
+def test_model_calls_get_deadline_budgets(rig, clip):
+    two_candidates(rig)
+    real.analyze(clip, time.time() + 240, lambda s: None)
+    gt, = rig.ground_timeouts
+    assert 240 - real.GROUND_START_RESERVE_SEC - 2 < gt <= 240 - real.GROUND_START_RESERVE_SEC
+    assert len(rig.choose_timeouts) == 2
+    assert all(240 - real.CHOOSE_MIN_LEFT_SEC - 3 < t <= 240 - real.CHOOSE_MIN_LEFT_SEC for t in rig.choose_timeouts)
+
+
+def test_late_grounding_is_logged(rig, clip, caplog):
+    two_candidates(rig)
+    with caplog.at_level(logging.WARNING, logger="pipeline.real"):
+        res = real.analyze(clip, time.time() + 10, lambda s: None)
+    assert rig.ground_timeouts == [0.0]  # no time to wait: a try, which succeeds when the model is free
+    assert any("too late for the check" in r.getMessage() for r in caplog.records)
+    assert res.verdict == "violation" and rig.verify_calls == []
+
+
+class NoModel:
+    def predict_video(self, *a, **k):
+        raise AssertionError("the model must not be used while another job holds it")
+
+
+@pytest.fixture
+def busy_model(monkeypatch):
+    """A VideoJev whose lock another job holds until the test ends."""
+    vj = videojev.VideoJev()
+    vj._install(NoModel(), "proc", None, None)
+    monkeypatch.setattr(videojev, "_INSTANCE", vj)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with vj._lock:
+            held.set()
+            release.wait(30)
+
+    threading.Thread(target=hold, daemon=True).start()
+    held.wait()
+    yield vj
+    release.set()
+
+
+def test_choose_skipped_when_model_busy(rig, clip, busy_model, monkeypatch, rules):
+    monkeypatch.setattr(real, "choose", REAL_CHOOSE)
+    monkeypatch.setattr(real, "CHOOSE_MIN_LEFT_SEC", 238.0)  # a choice may wait about 1.5 s for the model
+    two_candidates(rig)
+    t = time.monotonic()
+    res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert 1.0 < time.monotonic() - t < 5  # waited out one budget, then skipped the other choice
+    assert all(e.type_probs == {} for e in res.events)
+    ev, = kept(res)
+    assert ev.rule_id == "cash_unattended" and ev.justification == rules["cash_unattended"]["why"]
+
+
+def test_ground_busy_fails_the_job_with_a_clear_error(rig, clip, busy_model, monkeypatch):
+    monkeypatch.setattr(real, "ground", REAL_GROUND)
+    t = time.monotonic()
+    with pytest.raises(real.DeadlineExceeded, match="busy"):
+        real.analyze(clip, time.time() + real.GROUND_START_RESERVE_SEC + 0.5, lambda s: None)
+    assert time.monotonic() - t < 3
+
+
+def test_normalize_gets_a_deadline_budget(rig, clip, monkeypatch):
+    seen = []
+
+    def fake(path, out_path, timeout=None):
+        seen.append(timeout)
+        return str(path)
+
+    monkeypatch.setattr(frames, "normalize", fake)
+    real.analyze(clip, time.time() + 240, lambda s: None)
+    real.analyze(clip, time.time() + 50, lambda s: None)
+    assert seen[0] == pytest.approx(real.NORMALIZE_MAX_SEC)
+    assert seen[1] == pytest.approx(real.NORMALIZE_MIN_SEC)
+
+
+def test_normalize_failure_falls_back_to_the_original(rig, rotated_clip, tmp_path, monkeypatch, caplog):
+    clip = str(shutil.copy(rotated_clip, tmp_path / "input.mov"))
+
+    def boom(path, out_path, timeout=None):
+        raise frames.VideoError("ffmpeg failed: TimeoutExpired")
+
+    monkeypatch.setattr(frames, "normalize", boom)
+    two_candidates(rig)
+    with caplog.at_level(logging.WARNING, logger="pipeline.real"):
+        res = real.analyze(clip, time.time() + 240, lambda s: None)
+    assert rig.ground_calls[0][0] == clip and res.verdict == "violation"
+    assert any("original" in r.getMessage() for r in caplog.records)
+
+
+def test_unreadable_input_fails(rig, tmp_path):
+    bad = tmp_path / "input.mov"
+    bad.write_text("not a video")
+    with pytest.raises(frames.VideoError):
+        real.analyze(str(bad), time.time() + 240, lambda s: None)
+    assert rig.ground_calls == []
+
+
+def test_work_folder_next_to_the_input_without_tmpdir(rig, clip, monkeypatch):
+    for k in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.delenv(k, raising=False)
+    two_candidates(rig)
+    real.analyze(clip, time.time() + 240, lambda s: None)
+    assert all(Path(c["window"]).parent.parent == Path(clip).parent / "work" for c in rig.verify_calls)
+    assert sorted(os.listdir(Path(clip).parent)) == ["input.mov"]  # the work folder we made is gone
+    assert os.listdir(rig.scratch) == []
+
+
+def test_evidence_falls_back_to_single_frames(rig, clip, monkeypatch):
+    two_candidates(rig)
+    jpeg_at = frames.jpeg_at
+
+    def no_evidence(*a, **k):
+        raise frames.VideoError("seek failed")
+
+    def picky(path, t, quality=90):
+        if abs(t - 2.25) < 1e-6:
+            raise frames.VideoError("bad frame")
+        return jpeg_at(path, t, quality)
+
+    monkeypatch.setattr(frames, "evidence", no_evidence)
+    monkeypatch.setattr(frames, "jpeg_at", picky)
+    ev, = kept(real.analyze(clip, time.time() + 240, lambda s: None))
+    assert len(ev.evidence) == 1 and ev.timecode == ev.evidence[0].t == pytest.approx(0.75)  # t_start

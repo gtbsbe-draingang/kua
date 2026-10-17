@@ -149,3 +149,38 @@ def test_light_imports_do_not_load_torch():
             "assert not bad, bad\n")
     r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def _hold(lock, seconds):
+    held = threading.Event()
+
+    def run():
+        with lock:
+            held.set()
+            time.sleep(seconds)
+
+    threading.Thread(target=run, daemon=True).start()
+    held.wait()
+
+
+@pytest.mark.parametrize("call", ["ground", "choose"])
+def test_busy_model_raises_after_the_acquire_timeout(call):
+    model = FakeModel()
+    vj, _ = make(model)
+    _hold(vj._lock, 1.0)
+    t = time.monotonic()
+    with pytest.raises(videojev.ModelBusy):
+        if call == "ground":
+            vj.ground("/v.mp4", ["q"], timeout=0.2)
+        else:
+            vj.choose("/w.mp4", ["x", "y"], timeout=0.2)
+    assert 0.15 < time.monotonic() - t < 0.8 and model.calls == []
+
+
+def test_zero_timeout_is_a_try_and_none_waits():
+    vj, _ = make(FakeModel())
+    assert vj.ground("/v.mp4", ["q"], timeout=0) == {"q": pytest.approx([0.1] * 3)}  # free: proceeds
+    _hold(vj._lock, 0.3)
+    with pytest.raises(videojev.ModelBusy):
+        vj.choose("/w.mp4", ["x", "y"], timeout=0)
+    assert vj.choose("/w.mp4", ["x", "y"]) == {"x": 0.5, "y": 0.5}  # no timeout: waits for the holder

@@ -20,6 +20,7 @@ import logging
 import math
 import os
 import threading
+from contextlib import contextmanager
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ CHOICE_CONTEXT = int(os.environ.get("CHOICE_CONTEXT", "262144"))  # USAGE.md QA 
 MAX_FRAMES = int(os.environ.get("VIDEOJEV_MAX_FRAMES", "2048"))
 TORCH_THREADS = 4
 CHOICE_QUERY = "Which option best describes what happens at the cash desk in this video?"
+
+
+class ModelBusy(TimeoutError):
+    """Another job held the model for longer than this call's timeout."""
 
 
 class Curves(dict):
@@ -72,11 +77,42 @@ class VideoJev:
         self._processor = None
         self._prepare_video = None
         self._tensor = None
+        self._snapshot: str | None = None
 
     # ---- loading --------------------------------------------------------------------------
 
     def _install(self, model, processor, prepare_video, tensor) -> None:
         self._model, self._processor, self._prepare_video, self._tensor = model, processor, prepare_video, tensor
+
+    @contextmanager
+    def _hold(self, timeout: float | None, what: str):
+        """The model lock. timeout None waits for ever; <= 0 is a single try; otherwise wait at most that long."""
+        if timeout is None:
+            ok = self._lock.acquire()
+        elif timeout <= 0:
+            ok = self._lock.acquire(blocking=False)
+        else:
+            ok = self._lock.acquire(timeout=timeout)
+        if not ok:
+            raise ModelBusy(f"VideoJev {what}: the model stayed busy with another job for "
+                            f"{max(timeout or 0.0, 0.0):.1f} s")
+        try:
+            yield
+        finally:
+            self._lock.release()
+
+    def _source(self) -> str:
+        """The local snapshot folder when the weights are cached: loading by repo id can fail offline
+        (HF_HUB_OFFLINE=1). Falls back to the id itself (or a local path given as VIDEOJEV_MODEL)."""
+        if os.path.isdir(self.model_id):
+            return self.model_id
+        try:
+            from huggingface_hub import snapshot_download
+
+            return snapshot_download(self.model_id, revision=self.revision, local_files_only=True)
+        except Exception as e:
+            log.warning("no local snapshot of %s (%s); loading by repo id", self.model_id, type(e).__name__)
+            return self.model_id
 
     def load(self) -> None:
         with self._lock:
@@ -89,12 +125,14 @@ class VideoJev:
         from transformers import AutoModel, AutoProcessor
 
         torch.set_num_threads(TORCH_THREADS)
+        source = self._source()
         kw = {"trust_remote_code": True}
-        if self.revision:
+        if self.revision and source == self.model_id:
             kw["revision"] = self.revision
-        processor = AutoProcessor.from_pretrained(self.model_id, **kw)
-        model = AutoModel.from_pretrained(self.model_id, dtype=torch.bfloat16, device_map={"": self.device},
+        processor = AutoProcessor.from_pretrained(source, **kw)
+        model = AutoModel.from_pretrained(source, dtype=torch.bfloat16, device_map={"": self.device},
                                           attn_implementation="flash_attention_2", **kw)
+        self._snapshot = os.path.basename(source.rstrip("/")) if source != self.model_id else None
         model.prepare_for_inference()
         try:  # the remote module imports prepare_video; using it directly exposes the exact score times
             prepare = getattr(importlib.import_module(type(model).__module__), "prepare_video", None)
@@ -105,20 +143,22 @@ class VideoJev:
         self._install(model, processor, prepare, torch.tensor)
 
     def version(self) -> str:
-        rev = getattr(getattr(self._model, "config", None), "_commit_hash", None) or self.revision or "main"
+        rev = (getattr(getattr(self._model, "config", None), "_commit_hash", None) or self._snapshot
+               or self.revision or "main")
         return f"{self.model_id}@{rev}"
 
     # ---- tasks ----------------------------------------------------------------------------
 
-    def ground(self, video_path, queries: list[str]) -> Curves:
-        """One grounding pass over the whole video with every query: raw per-index probabilities by query."""
+    def ground(self, video_path, queries: list[str], timeout: float | None = None) -> Curves:
+        """One grounding pass over the whole video with every query: raw per-index probabilities by query.
+        Raises ModelBusy when the model is not free within timeout seconds."""
         queries = list(dict.fromkeys(queries))
         if not queries:
             return Curves()
         ids = [f"g{i}" for i in range(len(queries))]
         questions = [{"id": qid, "task": "grounding", "query": q} for qid, q in zip(ids, queries, strict=True)]
         record = None
-        with self._lock:
+        with self._hold(timeout, "grounding"):
             self._load_locked()
             if self._prepare_video is not None:
                 pixels, record = self._prepare_video(self._processor, str(video_path), fps=GROUND_FPS,
@@ -139,8 +179,9 @@ class VideoJev:
         return Curves(probs, times=[float(t) for t in record["score_times"]], bounds=record["score_bounds"],
                       step_sec=2.0 / float(record["fps"]))
 
-    def choose(self, window_path, options: list[str]) -> dict[str, float]:
-        """VideoJev's single-choice QA over the options: softmax probability per option text."""
+    def choose(self, window_path, options: list[str], timeout: float | None = None) -> dict[str, float]:
+        """VideoJev's single-choice QA over the options: softmax probability per option text.
+        Raises ModelBusy when the model is not free within timeout seconds."""
         options = list(options)
         if len(options) < 2:
             raise ValueError("choice needs at least two options")
@@ -148,7 +189,7 @@ class VideoJev:
             raise ValueError("choice options must be distinct")
         labelled = [f"{_label(i)}. {_sentence(o)}" for i, o in enumerate(options)]
         question = {"id": "choice", "task": "choice", "query": CHOICE_QUERY, "options": labelled}
-        with self._lock:
+        with self._hold(timeout, "choice"):
             self._load_locked()
             results = self._model.predict_video(self._processor, str(window_path), [question], fps=CHOICE_FPS,
                                                 max_frames=MAX_FRAMES, context=CHOICE_CONTEXT)
