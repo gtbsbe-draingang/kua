@@ -15,9 +15,15 @@ top_k candidates (rule, t_start, t_end, timecode, score). The generators:
   e  pruning       queries "always on" in the clean clips (share of cells >= 0.5 over every clean clip) are
                    dropped; the share is recomputed without the held-out clip in leave-one-out
   g  grid          chance baseline: top_k evenly spaced 4 s windows, score 0
+  h  cells         the clip cut into `cell`-second cells; each cell scored by the max of a grounding curve
+                   inside it (raw: max over all queries; median/logit/z: max over the queries' contrast
+                   curves), optionally after pruning (e); the top_k cells by score, timecode at the cell
+                   centre (or its peak). A clip of at most top_k cells is covered completely.
 
 Metrics (labels: data/labels.csv through the dump; 22 labels on 21 violation clips, 18 clean clips):
   tc_recall    share of labels with a candidate whose timecode is within +-2 s
+  long         the same over the labels of clips longer than LONG_SEC (more than top_k 4 s windows), where
+               the choice of windows matters; on shorter clips evenly spaced windows already cover everything
   win_recall   share of labels whose verify window [start-2, end+2] of some candidate covers t_label
   cands        mean and max candidates per clip; len = mean candidate length (s)
   auc          ROC-AUC of each label's best-matching (tc +-2 s) candidate score (missing = -inf) against each
@@ -45,6 +51,7 @@ if str(SVC) not in sys.path:
     sys.path.insert(0, str(SVC))
 
 TOL = 2.0  # the plan's timecode tolerance (s)
+LONG_SEC = 24.0  # 6 windows of 4 s: a longer clip cannot be covered by evenly spaced windows
 PAD = 2.0  # real.WINDOW_PAD_SEC
 EPS = 1e-6
 
@@ -257,6 +264,35 @@ def gen_grid(clip: Clip, top_k: int, length: float = 4.0) -> list[dict]:
              "timecode": t, "score": 0.0, "raw": 0.0} for t in centres]
 
 
+def cell_scores(clip: Clip, kind: str, keep: set[str] | None = None) -> tuple[np.ndarray, list[str]]:
+    """Per grounding index: the max over the (kept) queries of their (contrast) curves, and the rule of the
+    query that gives it."""
+    qs = [q for q in clip.queries if keep is None or q in keep] or list(clip.queries)
+    m = np.stack([contrast(clip.q[q], kind) for q in qs])
+    best = m.argmax(axis=0)
+    return m.max(axis=0), [clip.query_rules[qs[i]][0] for i in best]
+
+
+def gen_cells(clip: Clip, cell: float, top_k: int, kind: str = "raw", anchor: str = "center",
+              keep: set[str] | None = None) -> list[dict]:
+    """The top_k `cell`-second cells by the max score inside them (a clip of at most top_k cells is covered
+    completely); timecode at the cell centre, or at the time of the cell's highest score."""
+    x, rule_at = cell_scores(clip, kind, keep)
+    n_cells = max(1, int(math.ceil(clip.duration / cell - 1e-9)))
+    pool = []
+    for j in range(n_cells):
+        a, b = j * cell, min((j + 1) * cell, clip.duration)
+        idx = [i for i in range(len(clip.times)) if a - EPS <= clip.times[i] < b + EPS]
+        if not idx:
+            continue
+        ip = max(idx, key=lambda i: (x[i], -i))
+        tc = (a + b) / 2 if anchor == "center" else float(clip.times[ip])
+        pool.append({"rule": rule_at[ip], "t_start": a, "t_end": b, "timecode": tc, "score": float(x[ip]),
+                     "raw": float(max(clip.q[q][ip] for q in clip.queries))})
+    pool.sort(key=lambda c: (-c["score"], c["t_start"]))
+    return sorted(pool[:top_k], key=lambda c: c["t_start"])
+
+
 # ---- metrics ------------------------------------------------------------------------------------
 
 def best_match(cands: list[dict], t: float, key: str = "score") -> float:
@@ -277,7 +313,9 @@ def evaluate(clips: list[Clip], cands: dict[str, list[dict]], key: str = "score"
     clip_r0 = [all(r for (lc, _), r in zip(labels, r0, strict=True) if lc.name == c.name) for c in viol]
     n = [len(cands[c.name]) for c in clips]
     lens = [x["t_end"] - x["t_start"] for c in clips for x in cands[c.name]]
+    long = [h for (c, _), h in zip(labels, tc_hit, strict=True) if c.duration > LONG_SEC]
     return {"tc_recall": float(np.mean(tc_hit)), "win_recall": float(np.mean(win_hit)),
+            "long_recall": float(np.mean(long)) if long else None, "long_n": len(long),
             "cands_mean": float(np.mean(n)), "cands_max": int(max(n)),
             "len_mean": float(np.mean(lens)) if lens else 0.0,
             "auc": auc(pos, neg), "r0fp_labels": float(np.mean(r0)), "r0fp_clips": float(np.mean(clip_r0)),
@@ -293,23 +331,35 @@ GRIDS = {
     "c_logit": {"thr": [0.0, 0.5, 1.0, 2.0, 3.0], "max_len": [2.0, 4.0, 6.0, 10.0], "nms": [2.0, 4.0, 6.0]},
     "c_z": {"thr": [0.0, 0.5, 1.0, 1.5, 2.0], "max_len": [2.0, 4.0, 6.0, 10.0], "nms": [2.0, 4.0, 6.0]},
     "d": {"nms": [2.0, 4.0, 6.0]},
-    "e_prune": {"prune": [0.3, 0.5, 0.7, 0.9]},
+    # e: (b) / (c_logit) at their lowest threshold, on the queries that are not always on in the clean clips
+    "e": {"prune": [0.3, 0.5, 0.7], "kind": ["raw", "logit"], "max_len": [2.0, 4.0, 6.0], "nms": [2.0, 4.0]},
+    "h": {"cell": [3.0, 4.0, 5.0], "kind": ["raw", "median", "logit", "z"], "anchor": ["center", "peak"],
+          "prune": [None, 0.5]},
 }
+FAMILIES = ["g", "a", "b", "c_median", "c_logit", "c_z", "d", "e", "h"]
 
 
-def run_setting(clips, family: str, params: dict, top_k: int, keep_by_clip=None) -> dict[str, list[dict]]:
+def run_setting(clips, family: str, params: dict, top_k: int) -> dict[str, list[dict]]:
+    """Candidates per clip. Pruning (e, h) recomputes the always-on share without the clip itself, so a
+    clip's own curves and label never decide which of its queries are dropped."""
     out = {}
     for c in clips:
-        keep = keep_by_clip(c) if keep_by_clip else None
+        share = params.get("prune")
+        keep = prune_keep(clips, share, exclude=c.name) if share is not None else None
         if family == "a":
             out[c.name] = gen_current(c, params["cand"], top_k)
-        elif family == "b" or family.startswith("c_") or family.startswith("e_"):
-            kind = params.get("kind", "raw" if family == "b" else family[2:])
-            out[c.name] = gen_peaks(c, params["thr"], params["max_len"], params["nms"], top_k, kind, keep)
+        elif family == "b" or family.startswith("c_"):
+            kind = "raw" if family == "b" else family[2:]
+            out[c.name] = gen_peaks(c, params["thr"], params["max_len"], params["nms"], top_k, kind)
+        elif family == "e":
+            thr = 0.25 if params["kind"] == "raw" else 0.0
+            out[c.name] = gen_peaks(c, thr, params["max_len"], params["nms"], top_k, params["kind"], keep)
         elif family == "d":
-            out[c.name] = gen_intervals(c, params["nms"], top_k, keep)
+            out[c.name] = gen_intervals(c, params["nms"], top_k)
         elif family == "g":
             out[c.name] = gen_grid(c, top_k)
+        elif family == "h":
+            out[c.name] = gen_cells(c, params["cell"], top_k, params["kind"], params["anchor"], keep)
         else:
             raise ValueError(family)
     return out
@@ -325,26 +375,84 @@ def prune_keep(clips: list[Clip], share: float, exclude: str | None = None) -> s
 
 
 def objective(m: dict) -> tuple:
-    """Higher is better: timecode recall, then separability, then fewer candidates, then shorter ones."""
-    return (round(m["tc_recall"], 6), round(m["auc"] or 0.0, 6), -m["cands_mean"], -m["len_mean"])
+    """Higher is better: timecode recall, then long-clip recall, then separability, then fewer and shorter
+    candidates."""
+    return (round(m["tc_recall"], 6), round(m["long_recall"] or 0.0, 6), round(m["auc"] or 0.0, 6),
+            -round(m["cands_mean"], 6), -round(m["len_mean"], 6))
 
 
 def settings(family: str):
-    g = GRIDS[family]
+    g = GRIDS.get(family)
+    if not g:
+        yield {}
+        return
     keys = list(g)
     for vals in itertools.product(*(g[k] for k in keys)):
         yield dict(zip(keys, vals, strict=True))
 
 
+def loo(clips: list[Clip], family: str, top_k: int) -> dict:
+    """Leave one clip out: pick the family's setting on the other clips (objective), score the held-out
+    clip's labels (timecode within +-2 s) and whether a clean held-out clip gets candidates."""
+    per = [(p, run_setting(clips, family, p, top_k)) for p in settings(family)]
+    hits, chosen = [], {}
+    for h in clips:
+        rest = [c for c in clips if c.name != h.name]
+        best = max(per, key=lambda pc: objective(evaluate(rest, pc[1])))
+        key = json.dumps(best[0])
+        chosen[key] = chosen.get(key, 0) + 1
+        hits += [any(abs(x["timecode"] - t) <= TOL + EPS for x in best[1][h.name]) for t in h.t_labels]
+    return {"loo_tc_recall": float(np.mean(hits)), "chosen": chosen}
+
+
+def sensitivity(clips: list[Clip], family: str, params: dict, top_k: int) -> list[tuple[str, dict]]:
+    """The setting itself, then each parameter moved one grid step down and up."""
+    rows = [("chosen", evaluate(clips, run_setting(clips, family, params, top_k)))]
+    for k, vals in GRIDS.get(family, {}).items():
+        i = vals.index(params[k])
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(vals):
+                q = {**params, k: vals[j]}
+                rows.append((f"{k}={vals[j]}", evaluate(clips, run_setting(clips, family, q, top_k))))
+    return rows
+
+
+def query_table(clips: list[Clip]) -> list[dict]:
+    """Per query: label_pct = mean within-clip percentile of the max over +-2 s around each label among all
+    +-2 s windows of the same clip (0.5 = no localisation); auc = that max against each clean clip's
+    maximum; on_clean = share of clean-clip cells >= 0.5."""
+    def win_max(c, x, t):
+        m = (c.times >= t - TOL - EPS) & (c.times <= t + TOL + EPS)
+        return float(x[m].max())
+
+    clean = [c for c in clips if not c.has_violation]
+    rows = []
+    for q in clips[0].queries:
+        pct, pos = [], []
+        for c in clips:
+            if not c.has_violation:
+                continue
+            allw = np.array([win_max(c, c.q[q], tt) for tt in c.times])
+            for t in c.t_labels:
+                v = win_max(c, c.q[q], t)
+                pct.append(float(np.mean(allw < v) + 0.5 * np.mean(allw == v)))
+                pos.append(v)
+        rows.append({"query": q, "rule": clips[0].query_rules[q][0], "label_pct": float(np.mean(pct)),
+                     "auc": auc(pos, [float(c.q[q].max()) for c in clean]),
+                     "on_clean": always_on_share(clean)[q] if clean else None})
+    return sorted(rows, key=lambda r: -r["label_pct"])
+
+
 def fmt_row(name: str, m: dict) -> str:
     a = "-" if m["auc"] is None else f"{m['auc']:.3f}"
-    return (f"| {name} | {m['tc_recall']:.3f} | {m['win_recall']:.3f} | {m['cands_mean']:.2f} / {m['cands_max']} | "
-            f"{m['len_mean']:.1f} | {a} | {m['r0fp_labels']:.3f} / {m['r0fp_clips']:.3f} | "
+    lr = "-" if m["long_recall"] is None else f"{m['long_recall']:.3f}"
+    return (f"| {name} | {m['tc_recall']:.3f} | {lr} | {m['win_recall']:.3f} | {m['cands_mean']:.2f} / "
+            f"{m['cands_max']} | {m['len_mean']:.1f} | {a} | {m['r0fp_labels']:.3f} / {m['r0fp_clips']:.3f} | "
             f"{', '.join(m['missed']) or '-'} |")
 
 
-HEADER = ("| setting | tc_recall | win_recall | cands mean / max | len (s) | auc | r0fp labels / clips | missed |\n"
-          "|---|---|---|---|---|---|---|---|")
+HEADER = ("| setting | tc_recall | long | win_recall | cands mean / max | len (s) | auc | r0fp labels / clips "
+          "| missed |\n|---|---|---|---|---|---|---|---|---|")
 
 
 def main(argv=None) -> int:
@@ -353,27 +461,52 @@ def main(argv=None) -> int:
     ap.add_argument("--out")
     ap.add_argument("--top-k", type=int, default=6)
     ap.add_argument("--best", type=int, default=5, help="rows per family in the printed tables")
+    ap.add_argument("--families", default=",".join(FAMILIES))
+    ap.add_argument("--queries", action="store_true", help="print the per-query table")
+    ap.add_argument("--loo", action="append", default=[], help="family to report leave-one-out for")
+    ap.add_argument("--export", action="append", default=[],
+                    help='NAME=FAMILY:JSON_PARAMS, e.g. h4=h:{"cell":4.0,"kind":"logit","anchor":"center",'
+                         '"prune":null}; writes OUT/cands_NAME.json and prints the sensitivity table')
     a = ap.parse_args(argv)
     clips = load_dump(a.dump)
     out = Path(a.out or a.dump)
     out.mkdir(parents=True, exist_ok=True)
     n_lab = sum(len(c.t_labels) for c in clips if c.has_violation)
-    print(f"{len(clips)} clips, {sum(c.has_violation for c in clips)} violation clips, {n_lab} labels, "
-          f"{sum(1 - c.has_violation for c in clips)} clean; duration median "
+    print(f"{len(clips)} clips, {sum(c.has_violation for c in clips)} violation clips, {n_lab} labels "
+          f"({sum(len(c.t_labels) for c in clips if c.has_violation and c.duration > LONG_SEC)} on clips over "
+          f"{LONG_SEC:g} s), {sum(1 - c.has_violation for c in clips)} clean; duration median "
           f"{np.median([c.duration for c in clips]):.1f} s (min {min(c.duration for c in clips):.1f}, "
           f"max {max(c.duration for c in clips):.1f})")
+    if a.queries:
+        print("\n### per query\n| label_pct | auc vs clean | on_clean | rule | query |\n|---|---|---|---|---|")
+        for r in query_table(clips):
+            print(f"| {r['label_pct']:.3f} | {r['auc']:.3f} | {r['on_clean']:.2f} | {r['rule']} | {r['query']} |")
     results = []
-    for fam in ["g", "a", "b", "c_median", "c_logit", "c_z", "d"]:
+    for fam in [f for f in a.families.split(",") if f]:
         rows = []
-        for params in (settings(fam) if fam in GRIDS else [{}]):
+        for params in settings(fam):
             m = evaluate(clips, run_setting(clips, fam, params, a.top_k))
             rows.append((params, m))
             results.append({"family": fam, "params": params, **m})
         rows.sort(key=lambda r: objective(r[1]), reverse=True)
-        print(f"\n### {fam}\n{HEADER}")
+        print(f"\n### {fam} ({len(rows)} settings, best {min(a.best, len(rows))})\n{HEADER}")
         for params, m in rows[: a.best]:
             print(fmt_row(json.dumps(params), m))
     (out / "analysis.json").write_text(json.dumps(results, indent=1))
+    for fam in a.loo:
+        r = loo(clips, fam, a.top_k)
+        print(f"\nleave-one-clip-out {fam}: tc_recall {r['loo_tc_recall']:.3f}; settings chosen {r['chosen']}")
+    for spec in a.export:
+        name, rest = spec.split("=", 1)
+        fam, js = rest.split(":", 1)
+        params = json.loads(js)
+        cands = run_setting(clips, fam, params, a.top_k)
+        (out / f"cands_{name}.json").write_text(json.dumps(
+            {"family": fam, "params": params, "top_k": a.top_k, "clips": cands}, indent=1))
+        print(f"\n### sensitivity {name} = {fam} {json.dumps(params)}\n{HEADER}")
+        for label, m in sensitivity(clips, fam, params, a.top_k):
+            print(fmt_row(label, m))
+        print(f"wrote {out / f'cands_{name}.json'}")
     return 0
 
 
