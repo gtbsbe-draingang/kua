@@ -3,229 +3,150 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0e0b15">
 <title>Kuá — проверка кассовых видео</title>
-<style>
-:root{color-scheme:light dark;--bg:#f6f7f9;--fg:#1c2026;--muted:#5c6570;--card:#fff;--line:#d9dde3;--accent:#2457c5;--accent-fg:#fff;--ok:#1d7a3e;--warn:#b3261e;--warn-bg:#fdecea}
-@media (prefers-color-scheme:dark){:root{--bg:#14171b;--fg:#e6e9ee;--muted:#9aa4b0;--card:#1d2127;--line:#323944;--accent:#6b9bff;--accent-fg:#0d1117;--ok:#58c27d;--warn:#ff8a80;--warn-bg:#3a1f1d}}
-*{box-sizing:border-box}
-html,body{margin:0}
-body{background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow-wrap:anywhere}
-main{max-width:960px;margin:0 auto;padding:16px}
-h1{font-size:1.5rem;margin:8px 0 16px}
-h2{font-size:1.1rem;margin:0 0 8px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
-label{display:block;font-weight:600;margin:0 0 4px}
-input[type=password],input[type=file]{width:100%;max-width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
-.field{margin-bottom:12px}
-button{font:inherit;cursor:pointer}
-#submit{background:var(--accent);color:var(--accent-fg);border:0;border-radius:6px;padding:10px 20px;font-weight:600}
-#submit:disabled{opacity:.5;cursor:not-allowed}
-button:focus-visible,input:focus-visible,video:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
-#status{margin-top:12px;color:var(--muted)}
-#jobinfo{margin-top:6px;font-size:.85rem;color:var(--muted)}#jobinfo code{user-select:all}#copy{font-size:.85rem;background:transparent;color:var(--accent);border:1px solid var(--line);border-radius:6px;padding:0 8px}#playnote{margin:8px 0 0;color:var(--warn);font-size:.9rem}
-.fbtn{display:block;max-width:100%;padding:0;border:0;background:none}
-#error{margin-top:12px;padding:10px 12px;border-radius:6px;background:var(--warn-bg);color:var(--warn);font-weight:600}
-[hidden]{display:none!important}
-video{display:block;width:100%;max-width:100%;max-height:70vh;object-fit:contain;background:#000;border-radius:6px}
-.verdict{font-size:1.25rem;font-weight:700}
-.verdict.ok{color:var(--ok)}.verdict.bad{color:var(--warn)}
-.viol{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}
-.viol:first-child{border-top:0;margin-top:0;padding-top:0}
-.vtype{font-weight:700}
-.tc{background:transparent;color:var(--accent);border:1px solid var(--accent);border-radius:6px;padding:2px 10px;margin:4px 0;font-variant-numeric:tabular-nums}
-.frames{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
-figure{margin:0;max-width:100%}
-figure img{display:block;max-width:100%;height:auto;max-height:240px;border-radius:4px;border:1px solid var(--line)}
-figcaption{font-size:.85rem;color:var(--muted)}
-.rule{font-size:.95rem}
-blockquote{margin:4px 0;padding-left:12px;border-left:3px solid var(--line);color:var(--muted)}
-.hint{font-weight:600;border-left:4px solid var(--accent)}
-</style>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 3 3' shape-rendering='crispEdges'%3E%3Crect width='3' height='3' fill='%230e0b15'/%3E%3Crect width='1' height='1' fill='%232a2236'/%3E%3Crect x='1' width='1' height='1' fill='%239b7bff'/%3E%3Crect x='2' y='1' width='1' height='1' fill='%234b2aa8'/%3E%3C/svg%3E">
+<link rel="preload" href="/static/fonts/rubik-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/pixelify-sans-cyrillic-fixed.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/fonts/fonts.css?v=2">
+<link rel="stylesheet" href="/static/ui.css?v=2">
+<script src="/static/ui.js?v=2" defer></script>
 </head>
 <body>
+<div class="page">
+
+<header class="masthead">
+  <div class="masthead-top">
+    <p class="eyebrow">Проверка кассовых видео</p>
+    <span class="pixels" aria-hidden="true"></span>
+  </div>
+  <h1 class="wordmark">Kuá</h1>
+  <p class="lead">Показывает, что увидел на записи с кассы, и <b>никого не обвиняет</b>: решение принимает проверяющий.</p>
+</header>
+
 <main>
-<h1>Kuá — проверка кассовых видео</h1>
 
-<p class="card hint" id="hint">Результат — подсказка для проверки человеком, а не окончательное заключение.</p>
-
-<form class="card" id="form">
-  <div class="field">
-    <label for="key">API-ключ</label>
-    <input id="key" type="password" autocomplete="off">
+<section class="card" id="upload" aria-labelledby="upload-title">
+  <div class="card-head">
+    <h2 class="eyebrow" id="upload-title"><span class="step-no">01</span> Видео для проверки</h2>
   </div>
-  <div class="field">
-    <label for="file">Видео (.mov)</label>
-    <input id="file" type="file" accept=".mov,video/quicktime">
-  </div>
-  <button id="submit" type="submit">Проверить</button>
-  <div id="status" hidden><span id="stage" role="status" aria-live="polite"></span> · <span id="elapsed"></span></div>
-  <div id="jobinfo" hidden>Задача: <code id="jobid"></code> <button id="copy" type="button">Копировать</button></div>
-  <div id="error" role="alert" hidden></div>
-</form>
-
-<section class="card" id="player" hidden>
-  <video id="video" controls playsinline tabindex="-1"></video>
-  <p id="playnote" hidden>Браузер не может воспроизвести этот .mov. Результат проверки при этом доступен.</p>
+  <form id="form" novalidate>
+    <div class="form-grid">
+      <div class="field">
+        <label class="label" for="key">API-ключ</label>
+        <div class="key-row">
+          <input class="text-input" id="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Вставьте ключ доступа" aria-describedby="key-hint">
+          <button class="icon-btn" id="key-toggle" type="button" aria-controls="key" aria-pressed="false" aria-label="Показать ключ"></button>
+        </div>
+        <p class="hint" id="key-hint">Ключ хранится только в этом браузере.</p>
+      </div>
+      <div class="field">
+        <span class="label" id="file-label">Запись с камеры</span>
+        <label class="drop" id="drop" for="file">
+          <input class="sr-only" id="file" type="file" accept=".mov,.mp4,video/*" aria-describedby="drop-meta">
+          <span class="drop-icon" id="drop-icon" aria-hidden="true"></span>
+          <span class="drop-title">Перетащите видео сюда</span>
+          <span class="drop-file" id="drop-file"><span id="file-name"></span><span class="size" id="file-size"></span></span>
+          <span class="drop-or">или <u id="drop-pick">выберите файл</u></span>
+          <span class="drop-meta caption" id="drop-meta">MOV или MP4 · до 200 МБ</span>
+        </label>
+      </div>
+      <div class="actions">
+        <button class="btn-primary" id="submit" type="submit"><span>Проверить видео</span></button>
+        <p class="hint">Обычно проверка занимает до 4 минут.</p>
+      </div>
+    </div>
+    <div class="notice" id="notice" hidden>
+      <span class="label">Задача из ссылки</span>
+      <p class="notice-text" id="notice-text"></p>
+      <div class="box-actions"><button class="mini-btn" id="notice-action" type="button">Открыть задачу</button></div>
+    </div>
+    <div class="alert" id="error" role="alert" hidden>
+      <span class="label" id="error-label">Ошибка</span>
+      <p class="alert-text" id="error-text"></p>
+      <div class="box-actions" id="error-actions" hidden><button class="mini-btn" id="error-action" type="button"></button></div>
+      <details id="error-details" hidden><summary>Подробности</summary><code id="error-raw"></code></details>
+    </div>
+  </form>
 </section>
 
-<section class="card" id="result" hidden>
-  <h2>Результат</h2>
-  <div id="verdict" class="verdict"></div>
-  <div id="violations"></div>
+<section class="card" id="status" aria-labelledby="status-title" hidden>
+  <div class="card-head">
+    <h2 class="eyebrow" id="status-title"><span class="step-no">02</span> Обработка</h2>
+  </div>
+  <div class="stage-row">
+    <p class="stage-now"><span class="sr-only">Этап: </span><span id="stage-now" role="status" aria-live="polite"></span></p>
+    <span class="elapsed" id="elapsed" title="Прошло времени"></span>
+  </div>
+  <ol class="stepper" id="stepper" aria-label="Этапы обработки"></ol>
+  <div class="upload-meter" id="upload-meter" hidden>
+    <div class="upload-track"><div class="upload-fill" id="upload-fill"></div></div>
+    <span class="caption" id="upload-text"></span>
+  </div>
+  <p class="retry" id="retry" hidden></p>
+  <p class="jobline" id="jobline" hidden>
+    <span class="label">Задача</span> <code id="job-id"></code>
+    <button class="mini-btn" id="copy" type="button">Копировать</button>
+  </p>
 </section>
+
+<section class="result" id="result" aria-labelledby="result-title" hidden>
+  <div class="section-head">
+    <h2 class="eyebrow" id="result-title"><span class="step-no">03</span> Результат</h2>
+    <button class="btn-ghost" id="again" type="button">Проверить другое видео</button>
+  </div>
+
+  <div class="verdict" id="verdict" tabindex="-1">
+    <span class="verdict-icon" aria-hidden="true"></span>
+    <p class="verdict-title" id="verdict-title"></p>
+    <div class="verdict-body">
+      <p class="verdict-meta" id="verdict-meta"></p>
+      <p class="verdict-note">Результат — подсказка для проверяющего, а не юридическое или дисциплинарное заключение. Решение принимает человек.</p>
+    </div>
+  </div>
+
+  <div class="workspace" id="workspace">
+    <div class="viewer">
+      <div class="card">
+        <div class="player" id="player">
+          <video id="video" controls playsinline preload="metadata"></video>
+        </div>
+        <p class="playnote" id="playnote" hidden>Браузер не может воспроизвести это видео (возможно, формат или кодек не поддерживается). Кадры-доказательства и таймкоды эпизодов остаются доступны.</p>
+        <div class="timeline" id="timeline">
+          <div class="tl-top">
+            <span class="label">Шкала записи</span>
+            <span class="tl-legend caption" id="tl-legend"><span><i class="sw-band"></i>фрагмент</span><span><i class="sw-mark"></i>таймкод</span></span>
+          </div>
+          <div class="tl-marks" id="tl-marks"></div>
+          <div class="tl-track" id="tl-track"><div class="tl-head" id="tl-head"></div></div>
+          <div class="tl-scale caption" id="tl-scale" aria-hidden="true"></div>
+        </div>
+      </div>
+    </div>
+    <ol class="events" id="events" aria-label="Эпизоды для проверки"></ol>
+  </div>
+</section>
+
 </main>
-<script>
-(function(){
-"use strict";
-var STAGES={queued:"В очереди",decoding:"Чтение видео",grounding:"Поиск событий",verifying:"Проверка фрагментов",writing:"Формирование результата"};
-var VERDICTS={no_violation:"Нарушение не обнаружено",violation:"Обнаружены признаки возможных нарушений"};
-var POLL_MS=2000,MAX_RETRIES=5,CAP_MS=6*60*1000;
-var $=function(id){return document.getElementById(id)};
-var keyEl=$("key"),fileEl=$("file"),submit=$("submit"),statusEl=$("status"),stageEl=$("stage"),elapsedEl=$("elapsed"),errEl=$("error");
-var jobInfo=$("jobinfo"),jobIdEl=$("jobid"),playNote=$("playnote");
-var video=$("video"),playerEl=$("player"),resultEl=$("result"),verdictEl=$("verdict"),violEl=$("violations");
-var timer=null,tick=null,objectUrl=null,runId=0,curStage=null;
 
-try{var saved=localStorage.getItem("kua_api_key");if(saved)keyEl.value=saved}catch(e){}
-keyEl.addEventListener("input",function(){try{localStorage.setItem("kua_api_key",keyEl.value)}catch(e){}});
+<footer class="foot">
+  <div class="foot-brand"><span class="pixels" aria-hidden="true"></span><span class="label">Kuá</span></div>
+  <div class="stack">
+    <p>Сервис ссылается на публичные нормативные акты Национального Банка Республики Казахстан; их тексты опубликованы на adilet.zan.kz.</p>
+    <p>Kuá работает полностью локально: модели запущены на собственном сервере команды, облачные ИИ-сервисы не используются.</p>
+  </div>
+</footer>
 
-function fmt(sec){
-  var n=Math.round(Math.max(0,Number(sec)||0)*10),m=Math.floor(n/600),r=(n%600)/10;
-  return m+":"+(r<10?"0":"")+r.toFixed(1);
-}
-function showError(msg){errEl.textContent=msg;errEl.hidden=false}
-function stopTimers(){clearTimeout(timer);clearInterval(tick);timer=null;tick=null}
-function finish(){stopTimers();statusEl.hidden=true;submit.disabled=false}
-function fail(msg){showError(msg);finish()}
-function setStage(label){if(label!==curStage){curStage=label;stageEl.textContent=label}}
-function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+</div>
 
-function HttpError(status,detail){this.status=status;this.detail=detail}
-function detailOf(body){
-  if(!body||body.detail==null)return "";
-  var d=body.detail;
-  if(typeof d==="string")return d;
-  if(Array.isArray(d))return d.map(function(x){return x&&x.msg?x.msg:JSON.stringify(x)}).join("; ");
-  return JSON.stringify(d);
-}
-function check(r){
-  if(r.ok)return r;
-  return r.text().then(function(t){
-    var d="";try{d=detailOf(JSON.parse(t))}catch(e){}
-    throw new HttpError(r.status,d);
-  },function(){throw new HttpError(r.status,"")});
-}
-function describe(e,what){
-  if(e instanceof HttpError){
-    if(e.status===401)return "Неверный API-ключ";
-    if(e.status===404&&what==="poll")return "Задача не найдена на сервере (HTTP 404). Загрузите видео ещё раз."+(e.detail?" "+e.detail:"");
-    var base=e.status>=500?"Ошибка сервера":"Запрос отклонён";
-    return base+" (HTTP "+e.status+")"+(e.detail?": "+e.detail:"");
-  }
-  return "Нет связи с сервером. Проверьте соединение и повторите.";
-}
-function transient(e){return !(e instanceof HttpError)||e.status>=500}
-
-function seek(t){
-  video.currentTime=Number(t)||0;
-  playerEl.scrollIntoView({block:"nearest",behavior:"smooth"});
-  try{video.focus({preventScroll:true})}catch(e){}
-  var p=video.play();
-  if(p&&p.catch)p.catch(function(){playNote.hidden=false});
-}
-video.addEventListener("error",function(){playNote.hidden=false});
-
-function render(job){
-  violEl.textContent="";
-  var v=job.verdict;
-  if(VERDICTS[v]){verdictEl.textContent=VERDICTS[v];verdictEl.className="verdict "+(v==="no_violation"?"ok":"bad")}
-  else{verdictEl.textContent="Результат не распознан. Обратитесь к администратору сервиса.";verdictEl.className="verdict"}
-  (job.violations||[]).forEach(function(x){
-    var box=el("div","viol");
-    box.appendChild(el("div","vtype",x.type));
-    var b=el("button","tc",fmt(x.timecode_sec));b.type="button";
-    b.setAttribute("aria-label","Перейти к "+fmt(x.timecode_sec));
-    b.addEventListener("click",function(){seek(x.timecode_sec)});
-    box.appendChild(b);
-    box.appendChild(el("p",null,x.description));
-    var fr=el("div","frames");
-    (x.evidence_frames||[]).forEach(function(f){
-      var fg=el("figure");
-      var fb=el("button","fbtn");fb.type="button";
-      fb.setAttribute("aria-label","Кадр "+fmt(f.timestamp_sec)+": перейти к этому моменту");
-      var img=document.createElement("img");
-      img.src="data:image/jpeg;base64,"+f.image_base64;
-      img.alt="Кадр "+fmt(f.timestamp_sec);
-      fb.addEventListener("click",function(){seek(f.timestamp_sec)});
-      fb.appendChild(img);fg.appendChild(fb);fg.appendChild(el("figcaption",null,fmt(f.timestamp_sec)));
-      fr.appendChild(fg);
-    });
-    box.appendChild(fr);
-    var r=x.rule;
-    if(r){
-      var rb=el("div","rule");
-      rb.appendChild(el("strong",null,[r.document,r.clause].filter(Boolean).join(", ")));
-      if(r.quote)rb.appendChild(el("blockquote",null,r.quote));
-      if(r.url){
-        var u=String(r.url),a=el("a",null,u);
-        if(/^https?:\/\//i.test(u)){a.href=u;a.target="_blank";a.rel="noopener"}
-        rb.appendChild(a);
-      }
-      box.appendChild(rb);
-    }
-    violEl.appendChild(box);
-  });
-  resultEl.hidden=false;
-}
-
-function poll(id,key,my,t0,fails){
-  if(Date.now()-t0>CAP_MS){fail("Обработка заняла слишком долго (более 6 минут). Сообщите номер задачи: "+id);return}
-  fetch("/api/v1/jobs/"+encodeURIComponent(id),{headers:{"X-API-Key":key}}).then(check).then(function(r){return r.json()}).then(function(j){
-    if(my!==runId)return;
-    if(j.status==="done"){finish();render(j)}
-    else if(j.status==="failed"){fail(j.error||"Ошибка обработки")}
-    else{
-      setStage(STAGES[j.stage]||j.stage||"В очереди");
-      timer=setTimeout(function(){poll(id,key,my,t0,0)},POLL_MS);
-    }
-  }).catch(function(e){
-    if(my!==runId)return;
-    if(transient(e)&&fails<MAX_RETRIES){
-      timer=setTimeout(function(){poll(id,key,my,t0,fails+1)},POLL_MS);
-    }else fail(describe(e,"poll"));
-  });
-}
-function updateElapsed(t0){elapsedEl.textContent=Math.floor((Date.now()-t0)/1000)+" с"}
-
-$("copy").addEventListener("click",function(){
-  var t=jobIdEl.textContent;
-  try{navigator.clipboard.writeText(t).then(function(){$("copy").textContent="Скопировано"},function(){})}catch(e){}
-});
-
-$("form").addEventListener("submit",function(ev){
-  ev.preventDefault();
-  var f=fileEl.files[0],key=keyEl.value;
-  errEl.hidden=true;
-  if(!f){showError("Выберите видеофайл");return}
-  stopTimers();runId++;var my=runId;
-  submit.disabled=true;resultEl.hidden=true;jobInfo.hidden=true;playNote.hidden=true;curStage=null;
-  if(objectUrl)URL.revokeObjectURL(objectUrl);
-  objectUrl=URL.createObjectURL(f);video.src=objectUrl;playerEl.hidden=false;
-  var t0=Date.now();
-  setStage("Загрузка файла");statusEl.hidden=false;updateElapsed(t0);
-  tick=setInterval(function(){updateElapsed(t0)},1000);
-  var fd=new FormData();fd.append("file",f);
-  fetch("/api/v1/analyze",{method:"POST",headers:{"X-API-Key":key},body:fd}).then(check).then(function(r){return r.json()}).then(function(j){
-    if(my!==runId)return;
-    jobIdEl.textContent=j.job_id;$("copy").textContent="Копировать";jobInfo.hidden=false;
-    setStage("В очереди");
-    poll(j.job_id,key,my,t0,0);
-  }).catch(function(e){
-    if(my!==runId)return;
-    fail(e instanceof HttpError&&e.status===413?"Файл слишком большой (максимум 200 МБ)":describe(e,"post"));
-  });
-});
-})();
-</script>
+<dialog class="lightbox" id="lightbox" aria-labelledby="lb-caption">
+  <div class="lb-bar">
+    <p class="label" id="lb-caption"></p>
+    <button class="mini-btn" id="lb-seek" type="button">Перейти к моменту</button>
+    <button class="icon-btn" id="lb-close" type="button" aria-label="Закрыть"></button>
+  </div>
+  <img class="lb-img" id="lb-img" alt="">
+</dialog>
 </body>
 </html>
