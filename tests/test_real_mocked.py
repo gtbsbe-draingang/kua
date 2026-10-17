@@ -120,6 +120,13 @@ def setup_rig(monkeypatch, tmp_path, rules, th=None):
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     r = Rig(rules)
     r.scratch = scratch
+    r.retrieve_calls = []
+    r.retrieved = []  # clause ids the fake retrieval returns; [] = retrieval down
+
+    def retrieve(text, k, timeout):
+        r.retrieve_calls.append((text, k, timeout))
+        return list(r.retrieved)
+    monkeypatch.setattr(real.clients, "retrieve", retrieve)
     for name, fake in (("ground", r.ground), ("choose", r.choose), ("verify", r.verify),
                        ("verify_multi", r.verify_multi), ("judge_answer", r.judge)):
         monkeypatch.setattr(real, name, fake)
@@ -963,6 +970,67 @@ def test_grid_single_mode_type_from_check(grid_rig, tmp_path, rules):
         assert {e.rule_id for e in res.events if e.kept} == {want}
         assert grid_rig.judge_calls
         assert all([c["id"] for c in j["candidates"]] == cands for j in grid_rig.judge_calls)
+
+
+def test_clause_rules_built_from_catalogue(monkeypatch, tmp_path, rules):
+    setup_rig(monkeypatch, tmp_path, rules, TH_GRID)
+    from rag.corpus import find_quote, load_clauses
+    cfg = real._config()
+    clause = find_quote(load_clauses(), rules["cash_unattended"]["citations"][0]["quote"])
+    assert clause is not None and "cash_unattended" in cfg.clause_rules[clause.id]
+    assert all(r in cfg.detectable for rs in cfg.clause_rules.values() for r in rs)
+
+
+def test_clause_rules_failure_gives_empty_and_warning(monkeypatch, tmp_path, rules, caplog):
+    import rag.corpus
+    setup_rig(monkeypatch, tmp_path, rules, TH_GRID)
+
+    def boom():
+        raise OSError("no corpus")
+    monkeypatch.setattr(rag.corpus, "load_clauses", boom)
+    with caplog.at_level(logging.WARNING):
+        assert real._config().clause_rules == {}
+    assert sum("clause" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_grid_single_judge_candidates_from_retrieval(grid_rig, tmp_path):
+    from pipeline.logic import rules_from_hits
+    cfg = real._config()
+    cid = next(c for c, rs in cfg.clause_rules.items() if "cash_unattended" in rs)
+    path = long_clip(tmp_path, 8)
+    grid_rig.retrieved = [cid]
+    grid_rig.verdicts = {"other": (0.9, "none", "Кассир отходит от стола.")}
+    res = real.analyze(path, time.time() + 240, lambda s: None)
+    want = rules_from_hits([cid], cfg.clause_rules, None)
+    assert want[0] == "cash_unattended" and want[-1] == "other"
+    assert grid_rig.judge_calls
+    for j in grid_rig.judge_calls:
+        assert [c["id"] for c in j["candidates"]] == want
+    assert {tuple(e.judge_candidates) for e in res.events if e.kept} == {tuple(want)}
+    assert {c[:2] for c in grid_rig.retrieve_calls} == {("Кассир отходит от стола.", 8)}
+    assert all(0 < c[2] <= 5.0 for c in grid_rig.retrieve_calls)
+    # the check's own type goes first
+    grid_rig.verdicts = {"other": (0.9, "previous_cash_on_desk", "Кассир отходит от стола.")}
+    grid_rig.judge_calls.clear()
+    res = real.analyze(path, time.time() + 240, lambda s: None)
+    assert {e.judge_candidates[0] for e in res.events if e.kept} == {"previous_cash_on_desk"}
+
+
+def test_grid_single_retrieval_down_uses_old_candidates(grid_rig, tmp_path):
+    grid_rig.retrieved = []
+    grid_rig.verdicts = {"other": (0.9, "cash_unattended", "Кассир отходит.")}
+    res = real.analyze(long_clip(tmp_path, 8), time.time() + 240, lambda s: None)
+    assert grid_rig.retrieve_calls
+    assert all([c["id"] for c in j["candidates"]] == ["cash_unattended", "other"] for j in grid_rig.judge_calls)
+    assert {tuple(e.judge_candidates) for e in res.events if e.kept} == {("cash_unattended", "other")}
+
+
+def test_multi_mode_with_answers_does_not_retrieve(monkeypatch, tmp_path, rules):
+    rig = setup_rig(monkeypatch, tmp_path, rules, {**TH_GRID, "verify_mode": "multi"})
+    rig.retrieved = ["x"]
+    rig.multi = {0: ({"cash_unattended": 0.3, "previous_cash_on_desk": 0.8}, "obs")}
+    real.analyze(long_clip(tmp_path, 4), time.time() + 240, lambda s: None)
+    assert rig.retrieve_calls == [] and rig.judge_calls
 
 
 def test_grid_multi_mode_type_and_judge_candidates(monkeypatch, tmp_path, rules):

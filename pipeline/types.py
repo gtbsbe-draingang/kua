@@ -32,6 +32,7 @@ class Event:
     crop: list[int] | None = None  # zoom: the person box [x0, y0, x1, y1] the window was cut to; None = uncropped
     p_rules: dict[str, float | None] | None = None  # multi check: P(YES) per rule (None = no answer); None = not run
     citation: dict | None = None  # the judge's corpus citation {document, clause, quote, url}; None = the catalogue's
+    judge_candidates: list[str] | None = None  # the rule ids offered to the judge, in order; None = no judge step
 
 
 @dataclass

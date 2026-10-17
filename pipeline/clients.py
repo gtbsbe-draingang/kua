@@ -206,6 +206,25 @@ def _judge_endpoint() -> str:
     return base if base.endswith("/chat/completions") else base + "/v1/chat/completions"
 
 
+def retrieve(text: str, k: int, timeout: float) -> list[str]:
+    """The ids of the k corpus clauses closest to text, in hit order, from the RAG server's POST /retrieve (the judge's
+    base URL). [] for empty text, a disabled judge, or any failure; it never raises."""
+    try:
+        if not judge_enabled() or not (text or "").strip() or not timeout or timeout <= 0:
+            return []
+        base = os.environ.get("JUDGE_URL", JUDGE_URL).strip().rstrip("/")
+        base = base.removesuffix("/v1/chat/completions").removesuffix("/chat/completions")
+        r = _post(base + "/retrieve", {"texts": [text.strip()], "k": int(k)}, timeout)
+        if r.status_code != 200:
+            log.warning("retrieve: HTTP %s", r.status_code)
+            return []
+        hits = r.json()["hits"][0]
+        return [h["clause_id"] for h in hits if isinstance(h, dict) and isinstance(h.get("clause_id"), str)]
+    except Exception as e:
+        log.warning("retrieve failed: %s", type(e).__name__)
+        return []
+
+
 # The judge request's text: OBSERVATION_LABEL + observation (NO_OBSERVATION when empty) + CANDIDATES_LABEL + the
 # candidates as indented JSON + "\n\n<n> frame(s) from the moment follow." judge_fields reads it back.
 OBSERVATION_LABEL = "Observation from a video model (may be empty): "

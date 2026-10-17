@@ -458,3 +458,35 @@ def test_judge_answer_absent_fields_and_failures(monkeypatch):
     monkeypatch.setenv("JUDGE_URL", "")
     assert clients.judge_answer("obs", [], CANDS, 10) is None
     assert post.calls == []
+
+
+# ---- retrieve ------------------------------------------------------------------------------
+
+def test_retrieve_posts_texts_and_returns_ids(monkeypatch):
+    monkeypatch.setenv("JUDGE_URL", "http://127.0.0.1:30001/v1/chat/completions")
+    hits = [[{"clause_id": "V1:20", "score": 0.9, "part": 0}, {"clause_id": "V1:42", "score": 0.5, "part": 1}]]
+    post = MockPost(httpx.Response(200, json={"hits": hits}))
+    monkeypatch.setattr(clients.httpx, "post", post)
+    assert clients.retrieve("  Кассир уходит. ", 8, 4) == ["V1:20", "V1:42"]
+    url, body, timeout, trust_env = post.calls[0]
+    assert url == "http://127.0.0.1:30001/retrieve" and trust_env is False
+    assert body == {"texts": ["Кассир уходит."], "k": 8} and timeout.read == 4
+    monkeypatch.setenv("JUDGE_URL", "http://127.0.0.1:30001/")
+    post = MockPost(httpx.Response(200, json={"hits": hits}))
+    monkeypatch.setattr(clients.httpx, "post", post)
+    clients.retrieve("x", 3, 4)
+    assert post.calls[0][0] == "http://127.0.0.1:30001/retrieve"
+
+
+def test_retrieve_failure_returns_empty(monkeypatch):
+    monkeypatch.setenv("JUDGE_URL", "http://127.0.0.1:30001")
+    for reply in (httpx.Response(500, json={}), httpx.Response(200, json={"hits": []}),
+                  httpx.Response(200, text="not json"), httpx.Response(200, json={"hits": [[{"score": 1}]]}),
+                  httpx.ConnectError("down")):
+        monkeypatch.setattr(clients.httpx, "post", MockPost(reply))
+        assert clients.retrieve("Кассир уходит.", 8, 4) == []
+    post = MockPost()
+    monkeypatch.setattr(clients.httpx, "post", post)
+    assert clients.retrieve("", 8, 4) == [] and clients.retrieve("x", 8, 0) == []
+    monkeypatch.setenv("JUDGE_URL", "")
+    assert clients.retrieve("x", 8, 4) == [] and post.calls == []

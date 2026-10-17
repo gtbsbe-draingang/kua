@@ -225,6 +225,23 @@ def judge_candidates(type_probs: dict[str, float], verify_type: str, k: int = 3)
     return out
 
 
+def rules_from_hits(clause_ids: list[str], clause_rules: dict[str, list[str]], first: str | None,
+                    k: int = 4) -> list[str]:
+    """The judge's candidate rules from regulation retrieval: `first` (the check's own type, unless None, "none" or
+    "other"), then the catalogue rules citing each hit clause in hit order, without repeats; up to k rules in all,
+    then "other" last, always."""
+    out: list[str] = []
+    if first and first not in ("none", "other"):
+        out.append(first)
+    for cid in clause_ids:
+        for rid in clause_rules.get(cid, []):
+            if len(out) >= k:
+                break
+            if rid != "other" and rid not in out:
+                out.append(rid)
+    return out[:k] + ["other"]
+
+
 def accept_judge(rule_id: str | None, candidates: list[str]) -> bool:
     return rule_id is not None and rule_id in candidates
 
