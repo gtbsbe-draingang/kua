@@ -168,7 +168,7 @@ status() {
     return 0
   fi
   echo "running (pid $pid), not ready yet (GET /health fails); log tail:"
-  tail -n 3 "$LOG" | cut -c1-300
+  { tail -n 3 "$LOG" 2>/dev/null | cut -c1-300; } || true   # a missing log must not change the exit code
   return 3
 }
 
