@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import base64
 import hmac
+import json
+import logging
 import os
 import queue
 import re
@@ -12,13 +14,15 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
+from python_multipart.multipart import MultipartParser, parse_options_header
 
 import jobs
 from pipeline.types import PipelineResult, to_debug
 from rules import citation_text, load_rules
 
+log = logging.getLogger(__name__)
 CHUNK = 1024 * 1024
 DEADLINE_SEC = 240
 JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -77,7 +81,7 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
             try:
                 jobs.write_state(d, status="failed", error=f"{type(e).__name__}: {e}")
             except Exception:
-                pass
+                log.exception("could not record failure of job %s", jid)
 
     def worker() -> None:
         while True:
@@ -92,6 +96,7 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
         for i in range(workers):
             threading.Thread(target=worker, name=f"worker-{i}", daemon=True).start()
         for jid in jobs.pending_jobs(jobs_dir):
+            jobs.write_state(jobs_dir / jid, stage="queued")
             q.put(jid)
         yield
 
@@ -111,19 +116,85 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
             raise HTTPException(status_code=404, detail="UI not installed")
         return FileResponse(STATIC_INDEX)
 
+    async def receive_upload(request: Request, out_path: Path) -> None:
+        """Stream the multipart body, writing only the `file` part to out_path."""
+        ctype, params = parse_options_header(request.headers.get("content-type", ""))
+        boundary = params.get(b"boundary")
+        if ctype.lower() != b"multipart/form-data" or not boundary:
+            raise HTTPException(status_code=400, detail="expected multipart/form-data with a boundary")
+        st = {"total": 0, "exceeded": False, "found": False, "done": False, "out": None,
+              "field": b"", "value": b"", "headers": {}}
+
+        def on_part_begin():
+            st["headers"] = {}
+            st["field"] = st["value"] = b""
+
+        def on_header_field(data, start, end):
+            st["field"] += data[start:end]
+
+        def on_header_value(data, start, end):
+            st["value"] += data[start:end]
+
+        def on_header_end():
+            st["headers"][st["field"].lower()] = st["value"]
+            st["field"] = st["value"] = b""
+
+        def on_headers_finished():
+            disp = st["headers"].get(b"content-disposition", b"")
+            _, dparams = parse_options_header(disp)
+            if dparams.get(b"name") == b"file" and not st["found"]:
+                st["found"] = True
+                st["out"] = open(out_path, "wb")
+
+        def on_part_data(data, start, end):
+            if st["out"] is None:
+                return
+            st["total"] += end - start
+            if st["total"] > max_bytes:
+                st["exceeded"] = True
+                return
+            st["out"].write(data[start:end])
+
+        def on_part_end():
+            if st["out"] is not None:
+                st["out"].close()
+                st["out"] = None
+                st["done"] = True
+
+        parser = MultipartParser(boundary, {
+            "on_part_begin": on_part_begin, "on_header_field": on_header_field,
+            "on_header_value": on_header_value, "on_header_end": on_header_end,
+            "on_headers_finished": on_headers_finished, "on_part_data": on_part_data,
+            "on_part_end": on_part_end,
+        })
+        try:
+            async for chunk in request.stream():
+                parser.write(chunk)
+                if st["exceeded"]:
+                    raise HTTPException(status_code=413, detail="file too large")
+            parser.finalize()
+        except HTTPException:
+            raise
+        except OSError:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"malformed multipart body: {e}")
+        finally:
+            if st["out"] is not None:
+                st["out"].close()
+        if not st["done"]:
+            raise HTTPException(status_code=422, detail="missing multipart field 'file'")
+
     @app.post("/api/v1/analyze", dependencies=[Depends(check_key)])
-    async def analyze_route(file: UploadFile = File(...)):
-        # check_key runs before the body is parsed (dependencies resolve first)
+    async def analyze_route(request: Request):
+        # No body parameters are declared, so the key is checked before any body byte is read.
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > max_bytes + CHUNK:
+            raise HTTPException(status_code=413, detail="file too large")
         jid = jobs.new_job(jobs_dir)
         d = jobs_dir / jid
-        total = 0
         try:
-            with open(d / "input.mov", "wb") as out:
-                while chunk := await file.read(CHUNK):
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise HTTPException(status_code=413, detail="file too large")
-                    out.write(chunk)
+            await receive_upload(request, d / "input.mov")
         except BaseException:
             shutil.rmtree(d, ignore_errors=True)
             raise
@@ -131,18 +202,8 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
         q.put(jid)
         return {"job_id": jid, "status": "processing"}
 
-    @app.middleware("http")
-    async def reject_oversize(request: Request, call_next):
-        if request.url.path == "/api/v1/analyze" and request.method == "POST":
-            cl = request.headers.get("content-length")
-            if cl and cl.isdigit() and int(cl) > max_bytes + CHUNK:
-                from fastapi.responses import JSONResponse
-
-                return JSONResponse({"detail": "file too large"}, status_code=413)
-        return await call_next(request)
-
     @app.get("/api/v1/jobs/{job_id}", dependencies=[Depends(check_key)])
-    def get_job(job_id: str, debug: int = 0):
+    def get_job(job_id: str, debug: bool = False):
         if not JOB_ID_RE.match(job_id):
             raise HTTPException(status_code=404, detail="unknown job")
         d = jobs_dir / job_id
@@ -151,15 +212,20 @@ def create_app(jobs_dir: Path, api_key: str, analyze, rules: dict, workers: int 
         except (OSError, ValueError):
             raise HTTPException(status_code=404, detail="unknown job")
         status = state.get("status")
-        if status == "processing":
-            return {"job_id": job_id, "status": "processing", "stage": state.get("stage")}
         if status == "failed":
             return {"job_id": job_id, "status": "failed", "error": state.get("error") or "unknown error"}
-        import json
-
-        body = json.loads((d / "result.json").read_text(encoding="utf-8"))
+        if status != "done":
+            return {"job_id": job_id, "status": "processing", "stage": state.get("stage")}
+        try:
+            body = json.loads((d / "result.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return {"job_id": job_id, "status": "failed",
+                    "error": f"result unavailable: {type(e).__name__}: {e}"}
         if debug:
-            body["debug"] = json.loads((d / "debug.json").read_text(encoding="utf-8"))
+            try:
+                body["debug"] = json.loads((d / "debug.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
         return body
 
     return app

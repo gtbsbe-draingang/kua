@@ -119,6 +119,112 @@ def test_upload_slightly_over_limit_without_content_length_check(tmp_path, rules
         assert not list((tmp_path / "jobs").iterdir())
 
 
+def multipart_body(payload: bytes, boundary="BNDRY", field="file"):
+    return (f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="a.mov"\r\n'
+            f'Content-Type: video/quicktime\r\n\r\n').encode() + payload + f"\r\n--{boundary}--\r\n".encode()
+
+
+def test_wrong_key_with_big_body_401_no_folder(tmp_path, rules):
+    with make_client(tmp_path, rules) as c:
+        r = c.post("/api/v1/analyze", content=multipart_body(b"x" * 3_000_000),
+                   headers={"X-API-Key": "bad", "Content-Type": "multipart/form-data; boundary=BNDRY"})
+        assert r.status_code == 401
+        assert not list((tmp_path / "jobs").iterdir())
+
+
+def test_chunked_body_over_limit_413_no_folder(tmp_path, rules, monkeypatch):
+    monkeypatch.setenv("MAX_UPLOAD_BYTES", "1024")
+    body = multipart_body(b"x" * 100_000)
+
+    def gen():  # generator body: sent chunked, no Content-Length
+        for i in range(0, len(body), 8192):
+            yield body[i:i + 8192]
+
+    with make_client(tmp_path, rules) as c:
+        r = c.post("/api/v1/analyze", content=gen(),
+                   headers={**KEY, "Content-Type": "multipart/form-data; boundary=BNDRY"})
+        assert r.status_code == 413
+        assert not list((tmp_path / "jobs").iterdir())
+
+
+def test_chunked_body_under_limit_ok(tmp_path, rules, portrait_clip):
+    body = multipart_body(portrait_clip.read_bytes())
+
+    def gen():
+        for i in range(0, len(body), 65536):
+            yield body[i:i + 65536]
+
+    with make_client(tmp_path, rules) as c:
+        r = c.post("/api/v1/analyze", content=gen(),
+                   headers={**KEY, "Content-Type": "multipart/form-data; boundary=BNDRY"})
+        assert r.status_code == 200
+        assert wait(c, r.json()["job_id"])["status"] == "done"
+
+
+def test_missing_file_part_rejected_no_folder(tmp_path, rules):
+    with make_client(tmp_path, rules) as c:
+        r = c.post("/api/v1/analyze", content=multipart_body(b"abc", field="other"),
+                   headers={**KEY, "Content-Type": "multipart/form-data; boundary=BNDRY"})
+        assert r.status_code == 422 and "file" in r.json()["detail"]
+        r = c.post("/api/v1/analyze", content=b"{}", headers={**KEY, "Content-Type": "application/json"})
+        assert r.status_code == 400
+        assert not list((tmp_path / "jobs").iterdir())
+
+
+def test_resume_resets_stage_to_queued(tmp_path, rules):
+    import threading
+
+    jobs_dir = tmp_path / "jobs"
+    jid = jobs.new_job(jobs_dir)
+    d = jobs_dir / jid
+    (d / "input.mov").write_bytes(b"x")
+    jobs.write_state(d, status="processing", stage="verifying", created_at=time.time(), error=None)
+    gate = threading.Event()
+
+    def blocked(path, deadline, on_stage):
+        gate.wait(5)
+        return PipelineResult("no_violation", [], {}, {})
+
+    with make_client(tmp_path, rules, analyze=blocked, workers=1) as c:
+        body = c.get(f"/api/v1/jobs/{jid}", headers=KEY).json()
+        assert body == {"job_id": jid, "status": "processing", "stage": "queued"}
+        gate.set()
+        assert wait(c, jid)["status"] == "done"
+
+
+def test_done_without_result_json_reports_failed(tmp_path, rules):
+    jobs_dir = tmp_path / "jobs"
+    jid = jobs.new_job(jobs_dir)
+    jobs.write_state(jobs_dir / jid, status="done", stage="writing", created_at=1.0, error=None)
+    with make_client(tmp_path, rules) as c:
+        body = c.get(f"/api/v1/jobs/{jid}?debug=1", headers=KEY)
+        assert body.status_code == 200 and body.json()["status"] == "failed" and body.json()["error"]
+
+
+def test_unknown_status_treated_as_processing_and_missing_debug_omitted(tmp_path, rules, portrait_clip):
+    jobs_dir = tmp_path / "jobs"
+    jid = jobs.new_job(jobs_dir)
+    jobs.write_state(jobs_dir / jid, created_at=1.0)
+    with make_client(tmp_path, rules) as c:
+        assert c.get(f"/api/v1/jobs/{jid}", headers=KEY).json()["status"] == "processing"
+        jid2 = upload(c, portrait_clip).json()["job_id"]
+        wait(c, jid2)
+        (jobs_dir / jid2 / "debug.json").unlink()
+        assert "debug" not in c.get(f"/api/v1/jobs/{jid2}?debug=1", headers=KEY).json()
+
+
+def test_debug_true_accepted(tmp_path, rules, portrait_clip):
+    with make_client(tmp_path, rules) as c:
+        jid = upload(c, portrait_clip).json()["job_id"]
+        wait(c, jid)
+        assert "debug" in c.get(f"/api/v1/jobs/{jid}?debug=true", headers=KEY).json()
+
+
+def test_rotated_clip_runs(tmp_path, rules, rotated_clip):
+    with make_client(tmp_path, rules) as c:
+        assert wait(c, upload(c, rotated_clip).json()["job_id"])["status"] == "done"
+
+
 def test_unknown_job_404(tmp_path, rules):
     with make_client(tmp_path, rules) as c:
         assert c.get("/api/v1/jobs/aaaaaaaaaaaa", headers=KEY).status_code == 404

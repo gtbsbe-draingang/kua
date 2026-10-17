@@ -5,6 +5,7 @@ import io
 from fractions import Fraction
 
 import av
+from PIL import Image
 
 from pipeline.types import Frame
 
@@ -28,8 +29,28 @@ def _duration(container, stream) -> float:
     return 0.0
 
 
+_TRANSPOSE = {90: Image.Transpose.ROTATE_90, 180: Image.Transpose.ROTATE_180, 270: Image.Transpose.ROTATE_270}
+
+
+def _rotation(frame) -> int:
+    """Counter-clockwise degrees (0/90/180/270) to apply to make the frame upright."""
+    try:
+        return int(round(frame.rotation or 0)) % 360
+    except Exception:
+        return 0
+
+
+def _upright(img: Image.Image, rot: int) -> Image.Image:
+    if rot in _TRANSPOSE:
+        return img.transpose(_TRANSPOSE[rot])
+    if rot:
+        return img.rotate(rot, expand=True)
+    return img
+
+
 def probe(path) -> tuple[float, float, int, int]:
-    """Return (duration, fps, width, height). Raises VideoError for anything unreadable."""
+    """Return (duration, fps, width, height) with display dimensions (rotation applied).
+    Raises VideoError for anything unreadable."""
     try:
         with av.open(str(path)) as c:
             if not c.streams.video:
@@ -38,6 +59,9 @@ def probe(path) -> tuple[float, float, int, int]:
             dur = _duration(c, s)
             fps = _fps(s)
             w, h = s.codec_context.width, s.codec_context.height
+            first = next(c.decode(s), None)
+            if first is not None and _rotation(first) in (90, 270):
+                w, h = h, w
     except VideoError:
         raise
     except Exception as e:  # PyAV raises many distinct error types
@@ -69,7 +93,7 @@ def jpeg_at(path, t: float, quality: int = 90) -> Frame:
             if chosen is None:
                 raise VideoError("no frame decoded")
             buf = io.BytesIO()
-            chosen.to_image().save(buf, format="JPEG", quality=quality)
+            _upright(chosen.to_image(), _rotation(chosen)).save(buf, format="JPEG", quality=quality)
     except VideoError:
         raise
     except Exception as e:
